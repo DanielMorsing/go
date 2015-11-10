@@ -44,6 +44,23 @@ type cpuProfile struct {
 
 var cpuprof cpuProfile
 
+var causalprof struct {
+	// variables used to implement causal profiling
+	delaypersample uint64  // per sample delay
+	curdelay       uint64  // the amount of delays inserted so far
+	ignoredelay    uint64  // delays that need to be ignored. Usually from previous experiments
+	pc             uintptr // the line that is being experimented on
+	readerPC       uintptr // start PC of the reading thread. Used to exclude it from profiling experiments.
+	once           uint32  // atomic variable to make sure setup is only done once
+	wait           note    // init goroutine waits here
+}
+
+const (
+	noExp uint32 = iota
+	setupExp
+	hasExp
+)
+
 // SetCPUProfileRate sets the CPU profiling rate to hz samples per second.
 // If hz <= 0, SetCPUProfileRate turns off profiling.
 // If the profiler is on, the rate cannot be changed without first turning it off.
@@ -187,6 +204,62 @@ func (p *cpuProfile) addExtra() {
 // or the testing package's -test.cpuprofile flag instead.
 func CPUProfile() []byte {
 	panic("CPUProfile no longer available")
+}
+
+// Causal profiling helper functions
+//
+// Causal profiling is initialized through the following steps.
+// When we're calling this function, CPU profiling will have been turned on.
+// We set the 'once' variable and then go to sleep. Once the profiler gets a signal,
+// it will check the variable, set the PC for the callsite we're instrumenting and
+// then wake up this goroutine. We use the profiler to select a callsite so that
+// we can be certain that the speedup can be realized.
+//
+// Once we're woken up, we read the PC, figure out which experiment to run
+// and then use causalProfileInstall to set the delay per sample.
+//
+// We end an experiment by setting the delay per sample to 0. At that point,
+// everything should function as normal.
+//
+// All of these variables are checked concurrently by other threads and profiling signals
+// so we use atomic variables here.
+//go:linkname runtime_causalProfileStart runtime/causalprof.runtime_causalProfileStart
+func runtime_causalProfileStart() (pc uintptr) {
+
+	lock(&cpuprofLock)
+	if cpuprof == nil || !cpuprof.on {
+		unlock(&cpuprofLock)
+		return 0
+	}
+	// set up atomic variables so that profiling signals do the slowdown
+	atomic.Store64(&causalprof.delaypersample, 0)
+	atomic.Storeuintptr(&causalprof.pc, 0)
+	_g_ := getg()
+	atomic.Storeuintptr(&causalprof.readerPC, _g_.startpc)
+	atomic.Store(&causalprof.once, 1)
+
+	unlock(&cpuprofLock)
+
+	// Wait for profiling signal to come and tell us which line to instrument
+	notetsleepg(&causalprof.wait, -1)
+	noteclear(&causalprof.wait)
+	pc = atomic.Loaduintptr(&causalprof.pc)
+	return pc
+}
+
+//go:linkname runtime_causalProfileInstall runtime/causalprof.runtime_causalProfileInstall
+func runtime_causalProfileInstall(delaypersample uint64) {
+	atomic.Store64(&causalprof.delaypersample, delaypersample)
+	curdelay := atomic.Load64(&causalprof.curdelay)
+	if delaypersample == 0 {
+		atomic.Store(&causalprof.once, 0)
+		atomic.Store64(&causalprof.ignoredelay, curdelay)
+	}
+}
+
+//go:linkname runtime_causalProfileGetDelay runtime/causalprof.runtime_causalProfileGetDelay
+func runtime_causalProfileGetDelay() uint64 {
+	return atomic.Load64(&causalprof.curdelay)
 }
 
 //go:linkname runtime_pprof_runtime_cyclesPerSecond runtime/pprof.runtime_cyclesPerSecond

@@ -758,6 +758,13 @@ func StartCPUProfile(w io.Writer) error {
 // The caller must save the returned data and tags before calling readProfile again.
 func readProfile() (data []uint64, tags []unsafe.Pointer, eof bool)
 
+// IsCPUProfiling returns whether CPU profiling is turned on.
+func IsCPUProfiling() bool {
+	cpu.Lock()
+	defer cpu.Unlock()
+	return cpu.profiling
+}
+
 func profileWriter(w io.Writer) {
 	b := newProfileBuilder(w)
 	var err error
