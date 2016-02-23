@@ -714,7 +714,7 @@ func causalprofPark(gp *g) bool {
 		return false
 	}
 
-	// check if we need to delay this readying
+	// check if we need to park this goroutine
 	curdelay := atomic.Load64(&causalprof.curdelay)
 	ignoreddelay := atomic.Load64(&causalprof.ignoredelay)
 
