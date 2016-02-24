@@ -458,8 +458,8 @@ type g struct {
 	timer          *timer         // cached timer for time.Sleep
 	selectDone     uint32         // are we participating in a select and did someone win the race?
 
-	// causal profiling delay
-	causalprofdelay uint64
+	causalprofdelay    uint64 // causal profiling delay
+	causalprofParkTime int64
 
 	// Per-G GC state
 

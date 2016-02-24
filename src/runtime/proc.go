@@ -704,6 +704,15 @@ func causalprofStealTime(gp *g) {
 // Park goroutine on timer goroutine. Returns if the
 // goroutine needs to sleep. Returns with timers.lock held if true.
 func causalprofPark(gp *g) bool {
+
+	// causalprofParkTime holds the time at which this
+	// goroutine was put to sleep earlier. It needs to be
+	// cleared even if causal profiling is not running,
+	// so do this before the check.
+	parktime := gp.causalprofParkTime
+	if gp.causalprofParkTime != 0 {
+		gp.causalprofParkTime = 0
+	}
 	if atomic.Load64(&causalprof.delaypersample) == 0 {
 		return false
 	}
@@ -718,17 +727,24 @@ func causalprofPark(gp *g) bool {
 	curdelay := atomic.Load64(&causalprof.curdelay)
 	ignoreddelay := atomic.Load64(&causalprof.ignoredelay)
 
+	now := nanotime()
 	if gp.causalprofdelay < ignoreddelay {
 		gp.causalprofdelay = ignoreddelay
+	} else if parktime != 0 {
+		// we parked this goroutine before and now we're trying to schedule it
+		// again. Get the last park time and update the amount of delay
+		// executed by the difference between now and then.
+		gp.causalprofdelay += uint64(now - parktime)
 	}
+
 	sleepfor := int64(curdelay) - int64(gp.causalprofdelay)
-	gp.causalprofdelay = curdelay
 	if sleepfor <= 0 {
 		return false
 	}
 
+	gp.causalprofParkTime = now
 	t := new(timer)
-	t.when = nanotime() + sleepfor
+	t.when = now + sleepfor
 	t.f = goroutineReady
 	t.arg = gp
 	lock(&timers.lock)
