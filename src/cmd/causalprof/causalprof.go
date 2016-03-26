@@ -24,8 +24,6 @@ func main() {
 	if err != nil {
 		fatalln(err.Error())
 	}
-	// first sample should have the 0 experiment. Keep a reference to it
-	nullexp := samples[0]
 
 	// make an index of experiments concerning the same callsite
 	index := make(map[uint64][]*sample)
@@ -54,8 +52,14 @@ func main() {
 		} else {
 			fmt.Printf("%#x %s:%d\n", pc, file, line)
 		}
-		fmt.Println(nullexp.nsPerOp)
-		for _, s := range i {
+		if i[0].speedup != 0 {
+			fmt.Println("no null experiment, skip")
+			fmt.Println()
+			continue
+		}
+		nullexp := i[0]
+		fmt.Printf("%3d%%\t%dns\n", nullexp.speedup, nullexp.nsPerOp)
+		for _, s := range i[1:] {
 			percent := float64(s.nsPerOp-nullexp.nsPerOp) / float64(nullexp.nsPerOp)
 			percent *= 100
 			fmt.Printf("%3d%%\t%dns\t%+.3g%%\n", s.speedup, s.nsPerOp, percent)

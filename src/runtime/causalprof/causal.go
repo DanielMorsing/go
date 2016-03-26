@@ -62,9 +62,13 @@ func Stop() {
 	cpu.done <- true
 }
 
+type experiment struct {
+	hasNull   bool
+	remaining []int
+}
+
 func profileWriter(w io.Writer) {
-	experiments := make(map[uintptr][]int)
-	hasNullExperiment := false
+	experiments := make(map[uintptr]*experiment)
 	for {
 		pc := runtime_causalProfileStart()
 		if pc == 0 {
@@ -72,21 +76,18 @@ func profileWriter(w io.Writer) {
 		}
 		expinfo, ok := experiments[pc]
 		if !ok {
-			expinfo = rand.Perm(20)
-			experiments[pc] = expinfo
-		}
-		delaypersample := uint64(0)
-		if !hasNullExperiment {
-			hasNullExperiment = true
-		} else {
-			exp, expinfo := selectExperiment(expinfo)
-			if exp == -1 {
-				runtime_causalProfileInstall(0)
-				continue
+			expinfo = &experiment{
+				remaining: rand.Perm(20),
 			}
 			experiments[pc] = expinfo
-			delaypersample = uint64(exp) * (5 * delayPerPercent)
 		}
+		exp := selectExperiment(expinfo)
+		if exp == -1 {
+			runtime_causalProfileInstall(0)
+			continue
+		}
+		delaypersample := uint64(exp) * (5 * delayPerPercent)
+
 		resetProgress()
 		runtime_causalProfileInstall(delaypersample)
 		// TODO (dmo): variable sleep
@@ -109,13 +110,21 @@ func profileWriter(w io.Writer) {
 	}
 }
 
-func selectExperiment(expinfo []int) (int, []int) {
-	if len(expinfo) == 0 {
-		return -1, nil
+func selectExperiment(expinfo *experiment) int {
+	if !expinfo.hasNull && rand.Intn(2) == 1 {
+		expinfo.hasNull = true
+		return 0
 	}
-	exp := expinfo[0] + 1
-	expinfo = expinfo[1:]
-	return exp, expinfo
+	if len(expinfo.remaining) == 0 {
+		if !expinfo.hasNull {
+			expinfo.hasNull = true
+			return 0
+		}
+		return -1
+	}
+	exp := expinfo.remaining[0] + 1
+	expinfo.remaining = expinfo.remaining[1:]
+	return exp
 }
 
 func runtime_causalProfileStart() uintptr
