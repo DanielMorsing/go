@@ -99,6 +99,9 @@ func profileWriter(w io.Writer) {
 		}
 		runtime_causalProfileInstall(0)
 		diff := compareprogress()
+		if diff == -1 {
+			continue
+		}
 		_func := runtime.FuncForPC(pc)
 		file, line := _func.FileLine(pc)
 		fmt.Fprintf(w, "# %s %s:%d\n", _func.Name(), file, line)
@@ -167,6 +170,9 @@ func (p *Progress) Stop() {
 func compareprogress() int {
 	progressmu.Lock()
 	defer progressmu.Unlock()
+	if progress == 0 {
+		return -1
+	}
 
 	return int(int64(progresstime) / int64(progress))
 }
