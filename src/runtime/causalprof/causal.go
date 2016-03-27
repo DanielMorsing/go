@@ -58,8 +58,8 @@ func Stop() {
 		return
 	}
 	cpu.profiling = false
-	runtime.SetCPUProfileRate(0)
 	cpu.done <- true
+	runtime.SetCPUProfileRate(0)
 }
 
 type experiment struct {

@@ -64,6 +64,7 @@ import (
 	"net/http"
 	"os"
 	"runtime"
+	"runtime/causalprof"
 	"runtime/pprof"
 	"runtime/trace"
 	"sort"
@@ -78,6 +79,7 @@ func init() {
 	http.HandleFunc("/debug/pprof/profile", Profile)
 	http.HandleFunc("/debug/pprof/symbol", Symbol)
 	http.HandleFunc("/debug/pprof/trace", Trace)
+	http.HandleFunc("/debug/pprof/causalprof", CausalProfile)
 }
 
 // Cmdline responds with the running program's
@@ -169,6 +171,24 @@ func Trace(w http.ResponseWriter, r *http.Request) {
 	}
 	sleep(w, time.Duration(sec*float64(time.Second)))
 	trace.Stop()
+}
+
+// CausalProfile responds with the results of causal profiling experiments.
+// Profiling lasts for duration specified in seconds GET parameter, or for 60 seconds if not specified.
+// The package initialization registers it as /debug/pprof/trace.
+func CausalProfile(w http.ResponseWriter, r *http.Request) {
+	sec, _ := strconv.ParseInt(r.FormValue("seconds"), 10, 64)
+	if sec == 0 {
+		sec = 60
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	if err := causalprof.Start(w); err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprintf(w, "Could not enable causal profiling: %s\n", err)
+		return
+	}
+	sleep(w, time.Duration(sec)*time.Second)
+	causalprof.Stop()
 }
 
 // Symbol looks up the program counters listed in the request,
