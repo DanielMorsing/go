@@ -58,8 +58,17 @@ func Stop() {
 		return
 	}
 	cpu.profiling = false
-	cpu.done <- true
+
 	runtime.SetCPUProfileRate(0)
+	runtime_causalProfileWakeup()
+	cpu.done <- true
+	// clear out cpu profiling buffers. Profiling will not turn on again until this buffer has been emptied
+	for {
+		b := runtime.CPUProfile()
+		if b == nil {
+			break
+		}
+	}
 }
 
 type experiment struct {
@@ -72,6 +81,7 @@ func profileWriter(w io.Writer) {
 	for {
 		pc := runtime_causalProfileStart()
 		if pc == 0 {
+			<-cpu.done
 			break
 		}
 		expinfo, ok := experiments[pc]
@@ -133,6 +143,7 @@ func selectExperiment(expinfo *experiment) int {
 func runtime_causalProfileStart() uintptr
 func runtime_causalProfileInstall(delay uint64)
 func runtime_causalProfileGetDelay() uint64
+func runtime_causalProfileWakeup()
 
 var progress int
 var progresstime time.Duration

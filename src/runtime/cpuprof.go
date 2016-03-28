@@ -257,6 +257,11 @@ func runtime_causalProfileInstall(delaypersample uint64) {
 	}
 }
 
+//go:linkname runtime_causalProfileWakeup runtime/causalprof.runtime_causalProfileWakeup
+func runtime_causalProfileWakeup() {
+	notewakeup(&causalprof.wait)
+}
+
 //go:linkname runtime_causalProfileGetDelay runtime/causalprof.runtime_causalProfileGetDelay
 func runtime_causalProfileGetDelay() uint64 {
 	return atomic.Load64(&causalprof.curdelay)
