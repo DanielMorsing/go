@@ -703,6 +703,12 @@ func causalprofStealTime(gp *g) {
 
 // Park goroutine on timer goroutine. Returns if the
 // goroutine needs to sleep. Returns with timers.lock held if true.
+//
+// This function gets called from exitsyscall which initially
+// may not have a P and can not have write barriers
+// However, it only gets called on paths where a P has been
+// acquired
+//go:yeswritebarrierrec
 func causalprofPark(gp *g) bool {
 
 	// causalprofParkTime holds the time at which this
@@ -3254,9 +3260,7 @@ func exitsyscall() {
 			Gosched()
 		}
 
-		if causalprofPark(_g_) {
-			goparkunlock(&timers.lock, "sleep", traceEvGoSleep, 2)
-		}
+		exitsyscallCausalprof(_g_)
 		return
 	}
 
@@ -3292,6 +3296,15 @@ func exitsyscall() {
 	_g_.syscallsp = 0
 	_g_.m.p.ptr().syscalltick++
 	_g_.throwsplit = false
+}
+
+// this gets called in the P holding section of exitsyscall
+// but goparkunlock has writebarriers
+//go:yeswritebarrierrec
+func exitsyscallCausalprof(gp *g) {
+	if causalprofPark(gp) {
+		goparkunlock(&timers.lock, "sleep", traceEvGoSleep, 2)
+	}
 }
 
 //go:nosplit
@@ -3394,17 +3407,12 @@ func exitsyscall0(gp *g) {
 	}
 	unlock(&sched.lock)
 	if _p_ != nil {
-		// TODO(dmo): figure out if it makes sense to acquire the P here,
-		// if gp needs to be parked for causal profiling.
-		// If the p was previously idle, there aren't enough goroutines to schedule
-		// and running a round of scheduling is wasteful.
 		acquirep(_p_)
-		if causalprofPark(gp) {
-			casgstatus(gp, _Grunnable, _Gwaiting)
-			unlock(&timers.lock)
-			schedule() // Never returns
+		if !causalprofPark(gp) {
+			execute(gp, false) // Never returns.
 		}
-		execute(gp, false) // Never returns.
+		casgstatus(gp, _Grunnable, _Gwaiting)
+		unlock(&timers.lock)
 	}
 	if _g_.m.lockedg != 0 {
 		// Wait until another thread schedules gp and so m again.
