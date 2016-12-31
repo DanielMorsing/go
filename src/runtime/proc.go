@@ -3411,8 +3411,11 @@ func exitsyscall0(gp *g) {
 		if !causalprofPark(gp) {
 			execute(gp, false) // Never returns.
 		}
+		// we need to park the goroutine we came in with, so
+		// set it to waiting and run a normal scheduling round
 		casgstatus(gp, _Grunnable, _Gwaiting)
 		unlock(&timers.lock)
+		schedule() // Never returns.
 	}
 	if _g_.m.lockedg != 0 {
 		// Wait until another thread schedules gp and so m again.
