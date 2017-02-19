@@ -102,7 +102,7 @@ func profileWriter(w io.Writer) {
 		runtime_causalProfileInstall(delaypersample)
 		// TODO (dmo): variable sleep
 		select {
-		case <-time.After(500 * (time.Second / profilingHz)):
+		case <-time.After(1000 * (time.Second / profilingHz)):
 		case <-cpu.done:
 			runtime_causalProfileInstall(0)
 			return
