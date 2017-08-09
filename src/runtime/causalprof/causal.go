@@ -62,13 +62,6 @@ func Stop() {
 	runtime.SetCPUProfileRate(0)
 	runtime_causalProfileWakeup()
 	cpu.done <- true
-	// clear out cpu profiling buffers. Profiling will not turn on again until this buffer has been emptied
-	for {
-		b := runtime.CPUProfile()
-		if b == nil {
-			break
-		}
-	}
 }
 
 type experiment struct {
