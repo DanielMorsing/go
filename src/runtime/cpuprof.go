@@ -226,9 +226,9 @@ func CPUProfile() []byte {
 //go:linkname runtime_causalProfileStart runtime/causalprof.runtime_causalProfileStart
 func runtime_causalProfileStart() (pc uintptr) {
 
-	lock(&cpuprofLock)
-	if cpuprof == nil || !cpuprof.on {
-		unlock(&cpuprofLock)
+	lock(&cpuprof.lock)
+	if !cpuprof.on {
+		unlock(&cpuprof.lock)
 		return 0
 	}
 	// set up atomic variables so that profiling signals do the slowdown
@@ -238,7 +238,7 @@ func runtime_causalProfileStart() (pc uintptr) {
 	atomic.Storeuintptr(&causalprof.readerPC, _g_.startpc)
 	atomic.Store(&causalprof.once, 1)
 
-	unlock(&cpuprofLock)
+	unlock(&cpuprof.lock)
 
 	// Wait for profiling signal to come and tell us which line to instrument
 	notetsleepg(&causalprof.wait, -1)
