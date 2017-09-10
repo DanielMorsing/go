@@ -656,9 +656,6 @@ func fastrandinit() {
 
 // Mark gp ready to run.
 func ready(gp *g, traceskip int, next bool) {
-	if traceskip > 0 {
-		causalprofStealTime(gp)
-	}
 	if trace.enabled {
 		traceGoUnpark(gp, traceskip)
 	}
@@ -673,6 +670,11 @@ func ready(gp *g, traceskip int, next bool) {
 		throw("bad g->status in ready")
 	}
 
+	pp := _g_.m.p.ptr()
+	// run any pending causalprof delays and mark the
+	// goroutine with the current delay count for this P
+	causalprofDelay(_g_, pp)
+	gp.causalprofdelay = atomic.Load64(&pp.causalprofdelay)
 	// status is Gwaiting or Gscanwaiting, make Grunnable and put on runq
 	casgstatus(gp, _Gwaiting, _Grunnable)
 	runqput(_g_.m.p.ptr(), gp, next)
@@ -682,80 +684,58 @@ func ready(gp *g, traceskip int, next bool) {
 	releasem(mp)
 }
 
-// adjusts causal profiling state
-func causalprofStealTime(gp *g) {
+// Delay M for causal profiling.
+// We're holding onto a P here, so it
+// effectively delays that P
+//
+// Note that this function is re-entrant
+// We need to delay Ps before readying Ps,
+// so this gets called both from the signal handler
+// and user code
+func causalprofDelay(curg *g, pp *p) {
+	if curg == nil {
+		return
+	}
 	if atomic.Load64(&causalprof.delaypersample) == 0 {
 		return
 	}
-	// Since the gp is waiting, we can read and write its local
-	// state without racing with profiling thread
-	localdelay := gp.causalprofdelay
-	_g_ := getg()
-	stealg := _g_
-	if _g_ == _g_.m.g0 && _g_.m.curg != nil {
-		stealg = _g_.m.curg
-	}
-	stealtime := atomic.Load64(&stealg.causalprofdelay)
-	if stealtime > localdelay {
-		gp.causalprofdelay = stealtime
-	}
-}
-
-// Park goroutine on timer goroutine. Returns if the
-// goroutine needs to sleep. Returns with timers.lock held if true.
-//
-// This function gets called from exitsyscall which initially
-// may not have a P and can not have write barriers
-// However, it only gets called on paths where a P has been
-// acquired
-//go:yeswritebarrierrec
-func causalprofPark(gp *g) bool {
-
-	// causalprofParkTime holds the time at which this
-	// goroutine was put to sleep earlier. It needs to be
-	// cleared even if causal profiling is not running,
-	// so do this before the check.
-	parktime := gp.causalprofParkTime
-	if gp.causalprofParkTime != 0 {
-		gp.causalprofParkTime = 0
-	}
-	if atomic.Load64(&causalprof.delaypersample) == 0 {
-		return false
-	}
 	// some goroutines should never be delayed.
+	// test if the current M is running them and defer
+	// delays until later
 	profilereaderPC := atomic.Loaduintptr(&causalprof.readerPC)
-	switch gp.startpc {
+	switch curg.startpc {
 	case timerprocPC, gcBgMarkWorkerPC, profilereaderPC:
-		return false
+		return
 	}
 
-	// check if we need to park this goroutine
+	// check if we need to delay this M
 	curdelay := atomic.Load64(&causalprof.curdelay)
 	ignoreddelay := atomic.Load64(&causalprof.ignoredelay)
 
-	now := nanotime()
-	if gp.causalprofdelay < ignoreddelay {
-		gp.causalprofdelay = ignoreddelay
-	} else if parktime != 0 {
-		// we parked this goroutine before and now we're trying to schedule it
-		// again. Get the last park time and update the amount of delay
-		// executed by the difference between now and then.
-		gp.causalprofdelay += uint64(now - parktime)
+	origdelay := atomic.Load64(&pp.causalprofdelay)
+	pdelay := origdelay
+	if pdelay < ignoreddelay {
+		pdelay = ignoreddelay
 	}
 
-	sleepfor := int64(curdelay) - int64(gp.causalprofdelay)
+	sleepfor := (int64(curdelay) - int64(pdelay)) / 1000
 	if sleepfor <= 0 {
-		return false
+		return
 	}
-
-	gp.causalprofParkTime = now
-	t := new(timer)
-	t.when = now + sleepfor
-	t.f = goroutineReady
-	t.arg = gp
-	lock(&timers.lock)
-	addtimerLocked(t)
-	return true
+	// we've decided to sleep
+	// If a profiling signal comes along now
+	// it will have delayed the P and updated the counter
+	if !atomic.Cas64(&pp.causalprofdelay, origdelay, curdelay) {
+		return
+	}
+	begin := nanotime()
+	usleep(uint32(sleepfor))
+	end := nanotime()
+	// we might sleep more than we wanted
+	// we've already increased the delay amount earlier
+	// so only add the extra diff
+	sleptfor := (end - begin) - (sleepfor * 1000)
+	atomic.Xadd64(&pp.causalprofdelay, sleptfor)
 }
 
 func gcprocs() int32 {
@@ -2176,6 +2156,10 @@ func execute(gp *g, inheritTime bool) {
 	// M.
 	_g_.m.curg = gp
 	gp.m = _g_.m
+	pdelay := atomic.Load64(&_g_.m.p.ptr().causalprofdelay)
+	if gp.causalprofdelay > pdelay {
+		atomic.Xadd64(&_g_.m.p.ptr().causalprofdelay, int64(gp.causalprofdelay-pdelay))
+	}
 	casgstatus(gp, _Grunnable, _Grunning)
 	gp.waitsince = 0
 	gp.preempt = false
@@ -2616,7 +2600,6 @@ top:
 
 	var gp *g
 	var inheritTime bool
-	var causalpark bool
 
 	// Normal goroutines will check for need to wakeP in ready,
 	// but GCworkers and tracereaders will not, so the check must
@@ -2642,16 +2625,13 @@ top:
 			lock(&sched.lock)
 			gp = globrunqget(_g_.m.p.ptr(), 1)
 			unlock(&sched.lock)
-			causalpark = true
 		}
 	}
 	if gp == nil {
 		gp, inheritTime = runqget(_g_.m.p.ptr())
-		// We can see gp != nil here even if the M is spinning,
-		// if checkTimers added a local goroutine via goready.
-		if gp != nil {
-			causalpark = true
-		}
+		// We used to panic here if we were spinning with local work
+		// but we can see gp != nil here if checkTimers added a
+		// local goroutine via goready.
 	}
 	if gp == nil {
 		gp, inheritTime = findrunnable() // blocks until work is available
@@ -2662,7 +2642,6 @@ top:
 	// start a new spinning M.
 	if _g_.m.spinning {
 		resetspinning()
-		causalpark = true
 	}
 
 	if sched.disable.user && !schedEnabled(gp) {
@@ -2693,14 +2672,6 @@ top:
 		// Hands off own p to the locked m,
 		// then blocks waiting for a new p.
 		startlockedm(gp)
-		goto top
-	}
-
-	// this is a goroutine that is potentially parkable by causal profiling.
-	// If we do need park it, turn it from runnable to waiting and do another round of scheduling.
-	if causalpark && causalprofPark(gp) {
-		casgstatus(gp, _Grunnable, _Gwaiting)
-		unlock(&timers.lock)
 		goto top
 	}
 
@@ -3260,7 +3231,6 @@ func exitsyscall() {
 			Gosched()
 		}
 
-		exitsyscallCausalprof(_g_)
 		return
 	}
 
@@ -3296,15 +3266,6 @@ func exitsyscall() {
 	_g_.syscallsp = 0
 	_g_.m.p.ptr().syscalltick++
 	_g_.throwsplit = false
-}
-
-// this gets called in the P holding section of exitsyscall
-// but goparkunlock has writebarriers
-//go:yeswritebarrierrec
-func exitsyscallCausalprof(gp *g) {
-	if causalprofPark(gp) {
-		goparkunlock(&timers.lock, "sleep", traceEvGoSleep, 2)
-	}
 }
 
 //go:nosplit
@@ -3408,14 +3369,7 @@ func exitsyscall0(gp *g) {
 	unlock(&sched.lock)
 	if _p_ != nil {
 		acquirep(_p_)
-		if !causalprofPark(gp) {
-			execute(gp, false) // Never returns.
-		}
-		// we need to park the goroutine we came in with, so
-		// set it to waiting and run a normal scheduling round
-		casgstatus(gp, _Grunnable, _Gwaiting)
-		unlock(&timers.lock)
-		schedule() // Never returns.
+		execute(gp, false) // Never returns.
 	}
 	if _g_.m.lockedg != 0 {
 		// Wait until another thread schedules gp and so m again.
@@ -4125,6 +4079,17 @@ func sigprofNonGoPC(pc uintptr) {
 
 func processCausalprof(gp *g, mp *m, stk []uintptr) {
 	// causal profiling
+	// figure out if the gp that we got a signal for
+	// has a P attached. If not we don't need to do anything
+	// TODO(dmo): figure out if this is valid under concurrent
+	// executions
+	if mp.p == 0 {
+		return
+	}
+	pp := mp.p.ptr()
+	if pp.m.ptr() != mp || pp.status != _Prunning {
+		return
+	}
 	state := atomic.Load(&causalprof.once)
 	if state == 0 {
 		return
@@ -4141,6 +4106,10 @@ func processCausalprof(gp *g, mp *m, stk []uintptr) {
 		notewakeup(&causalprof.wait)
 		return
 	}
+	// delay this m. Since we're holding onto the P
+	// it effectively delays the P
+	// TODO(dmo): figure out if this is true for windows
+	causalprofDelay(gp, pp)
 	pc := atomic.Loaduintptr(&causalprof.pc)
 	if !hascausalpc(stk, pc) {
 		return
@@ -4151,20 +4120,9 @@ func processCausalprof(gp *g, mp *m, stk []uintptr) {
 		return
 	}
 
-	// we have a match and the experiment has been set up, so delay all other goroutines
+	// we have a match and the experiment has been set up, so delay all other Ps
 	atomic.Xadd64(&causalprof.curdelay, int64(delay))
-
-	// figure out which g we're running on.
-	// if it's a g0, then we should add the delay to the invoking
-	// goroutine
-	incgp := gp
-	if gp == mp.g0 {
-		if mp.curg == nil {
-			return
-		}
-		incgp = mp.curg
-	}
-	atomic.Xadd64(&incgp.causalprofdelay, int64(delay))
+	atomic.Xadd64(&pp.causalprofdelay, int64(delay))
 }
 
 func hascausalpc(stk []uintptr, cpc uintptr) bool {

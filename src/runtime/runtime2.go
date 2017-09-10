@@ -458,8 +458,7 @@ type g struct {
 	timer          *timer         // cached timer for time.Sleep
 	selectDone     uint32         // are we participating in a select and did someone win the race?
 
-	causalprofdelay    uint64 // causal profiling delay
-	causalprofParkTime int64
+	causalprofdelay uint64 // causal profiling delay
 
 	// Per-G GC state
 
@@ -676,6 +675,8 @@ type p struct {
 	// preempt is set to indicate that this P should be enter the
 	// scheduler ASAP (regardless of what G is running on it).
 	preempt bool
+
+	causalprofdelay uint64
 
 	pad cpu.CacheLinePad
 }
