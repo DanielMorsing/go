@@ -290,6 +290,12 @@ func gopark(unlockf func(*g, unsafe.Pointer) bool, lock unsafe.Pointer, reason w
 	}
 	mp := acquirem()
 	gp := mp.curg
+
+	// for causal profiling, any movement of the G onto another P can be taken as a causal connection
+	// Make sure that this P has executed all its delays and then
+	// mark the G with its counter
+	causalprofDelay(gp, mp.p.ptr())
+	gp.causalprofdelay = atomic.Load64(&mp.p.ptr().causalprofdelay)
 	status := readgstatus(gp)
 	if status != _Grunning && status != _Gscanrunning {
 		throw("gopark: bad g status")
@@ -674,7 +680,10 @@ func ready(gp *g, traceskip int, next bool) {
 	// run any pending causalprof delays and mark the
 	// goroutine with the current delay count for this P
 	causalprofDelay(_g_, pp)
-	gp.causalprofdelay = atomic.Load64(&pp.causalprofdelay)
+	pdelay := atomic.Load64(&pp.causalprofdelay)
+	if pdelay >= gp.causalprofdelay {
+		gp.causalprofdelay = pdelay
+	}
 	// status is Gwaiting or Gscanwaiting, make Grunnable and put on runq
 	casgstatus(gp, _Gwaiting, _Grunnable)
 	runqput(_g_.m.p.ptr(), gp, next)
@@ -2156,6 +2165,7 @@ func execute(gp *g, inheritTime bool) {
 	// M.
 	_g_.m.curg = gp
 	gp.m = _g_.m
+	// TODO(dmo): figure out if M locks are neccesary here
 	pdelay := atomic.Load64(&_g_.m.p.ptr().causalprofdelay)
 	if gp.causalprofdelay > pdelay {
 		atomic.Xadd64(&_g_.m.p.ptr().causalprofdelay, int64(gp.causalprofdelay-pdelay))
