@@ -290,12 +290,6 @@ func gopark(unlockf func(*g, unsafe.Pointer) bool, lock unsafe.Pointer, reason w
 	}
 	mp := acquirem()
 	gp := mp.curg
-
-	// for causal profiling, any movement of the G onto another P can be taken as a causal connection
-	// Make sure that this P has executed all its delays and then
-	// mark the G with its counter
-	causalprofDelay(gp, mp.p.ptr())
-	gp.causalprofdelay = atomic.Load64(&mp.p.ptr().causalprofdelay)
 	status := readgstatus(gp)
 	if status != _Grunning && status != _Gscanrunning {
 		throw("gopark: bad g status")
@@ -2165,7 +2159,6 @@ func execute(gp *g, inheritTime bool) {
 	// M.
 	_g_.m.curg = gp
 	gp.m = _g_.m
-	// TODO(dmo): figure out if M locks are neccesary here
 	pdelay := atomic.Load64(&_g_.m.p.ptr().causalprofdelay)
 	if gp.causalprofdelay > pdelay {
 		atomic.Xadd64(&_g_.m.p.ptr().causalprofdelay, int64(gp.causalprofdelay-pdelay))
@@ -2698,6 +2691,16 @@ top:
 func dropg() {
 	_g_ := getg()
 
+	pp := _g_.m.p.ptr()
+	if pp != nil && pp.status == _Prunning {
+		// this G is holding onto a P and we're about
+		// to abandon it. Make sure we've executed our
+		// delays and mark the G with the amount of delays
+		// we've executed
+		causalprofDelay(_g_.m.curg, pp)
+		_g_.m.curg.causalprofdelay = atomic.Load64(&pp.causalprofdelay)
+	}
+
 	setMNoWB(&_g_.m.curg.m, nil)
 	setGNoWB(&_g_.m.curg, nil)
 }
@@ -2947,6 +2950,10 @@ func goexit0(gp *g) {
 	}
 
 	dropg()
+	// dropg marks the causal profiling delay
+	// on the G, but this one is going to be freed anyway
+	// and we don't want a causal connection here.
+	gp.causalprofdelay = 0
 
 	if GOARCH == "wasm" { // no threads yet on wasm
 		gfput(_g_.m.p.ptr(), gp)
