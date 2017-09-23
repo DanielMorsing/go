@@ -699,6 +699,10 @@ func causalprofDelay(curg *g, pp *p) {
 	if curg == nil {
 		return
 	}
+	_g_ := getg()
+	if _g_ != _g_.m.g0 && _g_ != _g_.m.gsignal {
+		throw("causalprof delay on user-g")
+	}
 	if atomic.Load64(&causalprof.delaypersample) == 0 {
 		return
 	}
