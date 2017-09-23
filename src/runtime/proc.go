@@ -702,14 +702,6 @@ func causalprofDelay(curg *g, pp *p) {
 	if atomic.Load64(&causalprof.delaypersample) == 0 {
 		return
 	}
-	// some goroutines should never be delayed.
-	// test if the current M is running them and defer
-	// delays until later
-	profilereaderPC := atomic.Loaduintptr(&causalprof.readerPC)
-	switch curg.startpc {
-	case timerprocPC, gcBgMarkWorkerPC, profilereaderPC:
-		return
-	}
 
 	// check if we need to delay this M
 	curdelay := atomic.Load64(&causalprof.curdelay)

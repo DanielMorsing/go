@@ -50,7 +50,6 @@ var causalprof struct {
 	curdelay       uint64  // the amount of delays inserted so far
 	ignoredelay    uint64  // delays that need to be ignored. Usually from previous experiments
 	pc             uintptr // the line that is being experimented on
-	readerPC       uintptr // start PC of the reading thread. Used to exclude it from profiling experiments.
 	once           uint32  // atomic variable to make sure setup is only done once
 	wait           note    // init goroutine waits here
 }
@@ -234,8 +233,6 @@ func runtime_causalProfileStart() (pc uintptr) {
 	// set up atomic variables so that profiling signals do the slowdown
 	atomic.Store64(&causalprof.delaypersample, 0)
 	atomic.Storeuintptr(&causalprof.pc, 0)
-	_g_ := getg()
-	atomic.Storeuintptr(&causalprof.readerPC, _g_.startpc)
 	atomic.Store(&causalprof.once, 1)
 
 	unlock(&cpuprof.lock)
