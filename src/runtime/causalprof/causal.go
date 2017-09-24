@@ -13,12 +13,13 @@ import (
 	"runtime"
 	"runtime/pprof"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
 var cpu struct {
 	sync.Mutex
-	profiling bool
+	profiling int32
 	done      chan bool
 }
 
@@ -31,14 +32,14 @@ func Start(w io.Writer) error {
 		cpu.done = make(chan bool)
 	}
 
-	if cpu.profiling {
+	if cpu.profiling != 0 {
 		return fmt.Errorf("causal profiling already in use")
 	}
 
 	if pprof.IsCPUProfiling() {
 		return fmt.Errorf("cpu profiling already in use")
 	}
-	cpu.profiling = true
+	atomic.StoreInt32(&cpu.profiling, 1)
 	runtime.SetCPUProfileRate(profilingHz)
 	go profileWriter(w)
 	return nil
@@ -54,10 +55,10 @@ func Stop() {
 	cpu.Lock()
 	defer cpu.Unlock()
 
-	if !cpu.profiling {
+	if cpu.profiling == 0 {
 		return
 	}
-	cpu.profiling = false
+	atomic.StoreInt32(&cpu.profiling, 0)
 
 	runtime.SetCPUProfileRate(0)
 	runtime_causalProfileWakeup()
@@ -111,7 +112,7 @@ func profileWriter(w io.Writer) {
 		fmt.Fprintf(w, "# speedup %d%%\n", delaypersample/delayPerPercent)
 		fmt.Fprintf(w, "# %dns/op\n", diff)
 		fmt.Fprintf(w, "%#x %d %d\n", pc, delaypersample/delayPerPercent, diff)
-		// allow currently sleeping goroutines to return to normal
+		// allow system state to return to normal
 		time.Sleep(1000 * (time.Second / profilingHz))
 	}
 }
@@ -140,6 +141,7 @@ func runtime_causalProfileWakeup()
 
 var progress int
 var progresstime time.Duration
+var experimentNum uint64
 var progressmu sync.Mutex
 
 func resetProgress() {
@@ -147,26 +149,39 @@ func resetProgress() {
 	defer progressmu.Unlock()
 	progress = 0
 	progresstime = 0
+	atomic.AddUint64(&experimentNum, 1)
 }
 
 type Progress struct {
-	startTime  time.Time
-	startDelay uint64
+	startTime     time.Time
+	startDelay    uint64
+	experimentNum uint64
 }
 
 func StartProgress() Progress {
+	profiling := atomic.LoadInt32(&cpu.profiling)
+	if profiling == 0 {
+		return Progress{}
+	}
 	return Progress{
-		startTime:  time.Now(),
-		startDelay: runtime_causalProfileGetDelay(),
+		startTime:     time.Now(),
+		startDelay:    runtime_causalProfileGetDelay(),
+		experimentNum: atomic.LoadUint64(&experimentNum),
 	}
 }
 
 func (p *Progress) Stop() {
+	if p.startTime.IsZero() {
+		return
+	}
 	t := time.Since(p.startTime)
 	d := runtime_causalProfileGetDelay() - p.startDelay
 	t -= time.Duration(d)
 	progressmu.Lock()
 	defer progressmu.Unlock()
+	if experimentNum != p.experimentNum {
+		return
+	}
 	progresstime += t
 	progress += 1
 }
@@ -177,6 +192,9 @@ func compareprogress() int {
 	if progress == 0 {
 		return -1
 	}
-
-	return int(int64(progresstime) / int64(progress))
+	prog := int(int64(progresstime) / int64(progress))
+	progress = 0
+	progresstime = 0
+	atomic.AddUint64(&experimentNum, 1)
+	return prog
 }
