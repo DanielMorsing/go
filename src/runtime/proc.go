@@ -695,13 +695,17 @@ func ready(gp *g, traceskip int, next bool) {
 // We need to delay Ps before readying Ps,
 // so this gets called both from the signal handler
 // and user code
+//
+// Since this gets called in the syscall path, it
+// needs to be nosplit
+//go:nosplit
 func causalprofDelay(curg *g, pp *p) {
 	if curg == nil {
 		return
 	}
 	_g_ := getg()
-	if _g_ != _g_.m.g0 && _g_ != _g_.m.gsignal {
-		throw("causalprof delay on user-g")
+	if _g_ != _g_.m.g0 && _g_ != _g_.m.gsignal && _g_.m.locks == 0 {
+		throw("causalprof delay on with preemption possible")
 	}
 	if atomic.Load64(&causalprof.delaypersample) == 0 {
 		return
@@ -3085,6 +3089,13 @@ func reentersyscall(pc, sp uintptr) {
 		save(pc, sp)
 	}
 
+	// the m might lose the p it was running on.
+	// If we come back from the syscall and we grab an idle P
+	// we need to make sure that it receives the delay
+	// from the G
+	causalprofDelay(_g_, _g_.m.p.ptr())
+	_g_.causalprofdelay = atomic.Load64(&_g_.m.p.ptr().causalprofdelay)
+
 	_g_.m.syscalltick = _g_.m.p.ptr().syscalltick
 	_g_.sysblocktraced = true
 	_g_.m.mcache = nil
@@ -3225,6 +3236,13 @@ func exitsyscall() {
 		_g_.m.p.ptr().syscalltick++
 		// We need to cas the status and scan before resuming...
 		casgstatus(_g_, _Gsyscall, _Grunning)
+
+		// If we managed to grab an idle P that hasn't had the most
+		// recent delay executed on it, grab the delay from the g
+		pdelay := atomic.Load64(&_g_.m.p.ptr().causalprofdelay)
+		if _g_.causalprofdelay > pdelay {
+			atomic.Xadd64(&_g_.m.p.ptr().causalprofdelay, int64(_g_.causalprofdelay-pdelay))
+		}
 
 		// Garbage collector isn't running (since we are),
 		// so okay to clear syscallsp.
