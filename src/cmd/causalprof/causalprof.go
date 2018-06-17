@@ -46,16 +46,15 @@ func main() {
 		fatalln(err.Error())
 	}
 	for pc, i := range index {
+		// not enough baseline data
+		if i[0].speedup != 0 || len(i) < 5 {
+			continue
+		}
 		file, line, fn := pcln.PCToLine(pc - 1)
 		if fn == nil {
 			fmt.Printf("%#x\n", pc)
 		} else {
 			fmt.Printf("%#x %s:%d\n", pc, file, line)
-		}
-		if i[0].speedup != 0 {
-			fmt.Println("no null experiment, skip")
-			fmt.Println()
-			continue
 		}
 		nullexp := i[0]
 		fmt.Printf("%3d%%\t%dns\n", nullexp.speedup, nullexp.nsPerOp)
