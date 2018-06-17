@@ -673,7 +673,7 @@ func ready(gp *g, traceskip int, next bool) {
 	pp := _g_.m.p.ptr()
 	// run any pending causalprof delays and mark the
 	// goroutine with the current delay count for this P
-	causalprofDelay(_g_, pp)
+	causalprofDelay(pp)
 	pdelay := atomic.Load64(&pp.causalprofdelay)
 	if pdelay >= gp.causalprofdelay {
 		gp.causalprofdelay = pdelay
@@ -699,10 +699,7 @@ func ready(gp *g, traceskip int, next bool) {
 // Since this gets called in the syscall path, it
 // needs to be nosplit
 //go:nosplit
-func causalprofDelay(curg *g, pp *p) {
-	if curg == nil {
-		return
-	}
+func causalprofDelay(pp *p) {
 	_g_ := getg()
 	if _g_ != _g_.m.g0 && _g_ != _g_.m.gsignal && _g_.m.locks == 0 {
 		throw("causalprof delay on with preemption possible")
@@ -2697,7 +2694,7 @@ func dropg() {
 		// to abandon it. Make sure we've executed our
 		// delays and mark the G with the amount of delays
 		// we've executed
-		causalprofDelay(_g_.m.curg, pp)
+		causalprofDelay(pp)
 		_g_.m.curg.causalprofdelay = atomic.Load64(&pp.causalprofdelay)
 	}
 
@@ -3093,7 +3090,7 @@ func reentersyscall(pc, sp uintptr) {
 	// If we come back from the syscall and we grab an idle P
 	// we need to make sure that it receives the delay
 	// from the G
-	causalprofDelay(_g_, _g_.m.p.ptr())
+	causalprofDelay(_g_.m.p.ptr())
 	_g_.causalprofdelay = atomic.Load64(&_g_.m.p.ptr().causalprofdelay)
 
 	_g_.m.syscalltick = _g_.m.p.ptr().syscalltick
@@ -4140,7 +4137,7 @@ func processCausalprof(gp *g, mp *m, stk []uintptr) {
 	// delay this m. Since we're holding onto the P
 	// it effectively delays the P
 	// TODO(dmo): figure out if this is true for windows
-	causalprofDelay(gp, pp)
+	causalprofDelay(pp)
 	pc := atomic.Loaduintptr(&causalprof.pc)
 	if !hascausalpc(stk, pc) {
 		return
