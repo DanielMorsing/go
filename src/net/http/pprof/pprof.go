@@ -181,6 +181,12 @@ func CausalProfile(w http.ResponseWriter, r *http.Request) {
 	if sec == 0 {
 		sec = 60
 	}
+
+	if durationExceedsWriteTimeout(r, float64(sec)) {
+		serveError(w, http.StatusBadRequest, "profile duration exceeds server's WriteTimeout")
+		return
+	}
+
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	if err := causalprof.Start(w); err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
