@@ -60,7 +60,7 @@ func Stop() {
 	}
 	atomic.StoreInt32(&cpu.profiling, 0)
 
-	runtime.SetCPUProfileRate(0)
+	runtime_causalProfileStopProf()
 	runtime_causalProfileWakeup()
 	cpu.done <- true
 }
@@ -138,6 +138,7 @@ func runtime_causalProfileStart() uintptr
 func runtime_causalProfileInstall(delay uint64)
 func runtime_causalProfileGetDelay() uint64
 func runtime_causalProfileWakeup()
+func runtime_causalProfileStopProf()
 
 var progress int
 var progresstime time.Duration

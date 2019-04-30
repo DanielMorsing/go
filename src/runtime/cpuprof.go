@@ -235,6 +235,11 @@ func runtime_causalProfileStart() (pc uintptr) {
 	atomic.Storeuintptr(&causalprof.pc, 0)
 	atomic.Store(&causalprof.once, 1)
 
+	// ugly: Part of the shutdown process for causal profiling is to send a signal on
+	// a note in case we're waiting for a PC. However, if we're not waiting
+	// then that note will be flagged and we will fail on double wakeup
+	noteclear(&causalprof.wait)
+
 	unlock(&cpuprof.lock)
 
 	// Wait for profiling signal to come and tell us which line to instrument
@@ -262,6 +267,25 @@ func runtime_causalProfileWakeup() {
 //go:linkname runtime_causalProfileGetDelay runtime/causalprof.runtime_causalProfileGetDelay
 func runtime_causalProfileGetDelay() uint64 {
 	return atomic.Load64(&causalprof.curdelay)
+}
+
+// stop the profiler and discard the profile buffer atomically.
+//
+// Causal profiling uses the profiling system, but does not read records
+// written by it. After a profile has been stopped, the profiler will let data
+// sit in the buffer, waiting for a reader to empty it before it will let profiling
+// be turned on again. We have to empty out the buffer and stop the profiler
+// atomically, since there's a small window between causal prof stopping and clearing
+// the buffer where a profiler might encounter our dirty data.
+//
+//go:linkname runtime_causalProfileStopProf runtime/causalprof.runtime_causalProfileStopProf
+func runtime_causalProfileStopProf() {
+	lock(&cpuprof.lock)
+	setcpuprofilerate(0)
+	cpuprof.on = false
+	cpuprof.log = nil
+	unlock(&cpuprof.lock)
+
 }
 
 //go:linkname runtime_pprof_runtime_cyclesPerSecond runtime/pprof.runtime_cyclesPerSecond
