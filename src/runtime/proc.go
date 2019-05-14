@@ -4086,6 +4086,7 @@ func processCausalprof(gp *g, mp *m, stk []uintptr) {
 	// TODO(dmo): figure out if this is true for windows
 	causalprofDelay(pp)
 	pc := atomic.Loaduintptr(&causalprof.pc)
+	atomic.Xadd64(&causalprof.allsamples, 1)
 	if !hascausalpc(stk, pc) {
 		return
 	}
@@ -4096,6 +4097,7 @@ func processCausalprof(gp *g, mp *m, stk []uintptr) {
 	}
 
 	// we have a match and the experiment has been set up, so delay all other Ps
+	atomic.Xadd64(&causalprof.delaysamples, 1)
 	atomic.Xadd64(&causalprof.curdelay, int64(delay))
 	atomic.Xadd64(&pp.causalprofdelay, int64(delay))
 }

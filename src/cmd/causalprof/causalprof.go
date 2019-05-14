@@ -61,7 +61,8 @@ func main() {
 		for _, s := range i[1:] {
 			percent := float64(s.nsPerOp-nullexp.nsPerOp) / float64(nullexp.nsPerOp)
 			percent *= 100
-			fmt.Printf("%3d%%\t%dns\t%+.3g%%\n", s.speedup, s.nsPerOp, percent)
+			percentsamples := (float64(s.speedup)) * (float64(s.delaysamples) / float64(s.allsamples))
+			fmt.Printf("%3d%%\t%dns\t%+.3g%%\t%.3g%%\n", s.speedup, s.nsPerOp, percent, percentsamples)
 		}
 		fmt.Println()
 	}
@@ -69,9 +70,11 @@ func main() {
 }
 
 type sample struct {
-	pc      uint64
-	speedup int
-	nsPerOp int64
+	pc           uint64
+	speedup      int
+	nsPerOp      int64
+	delaysamples int64
+	allsamples   int64
 }
 
 type bySpeedup []*sample
@@ -94,7 +97,7 @@ func readProfFile(path string) ([]*sample, error) {
 			continue
 		}
 		fields := strings.Fields(s)
-		if len(fields) != 3 {
+		if len(fields) != 5 {
 			return nil, fmt.Errorf("corrupt causalprof file, had ", len(fields), "fields; expected 3")
 		}
 		pc, err := strconv.ParseUint(fields[0], 0, 64)
@@ -109,10 +112,20 @@ func readProfFile(path string) ([]*sample, error) {
 		if err != nil {
 			return nil, err
 		}
+		delaysamples, err := strconv.ParseInt(fields[3], 10, 64)
+		if err != nil {
+			return nil, err
+		}
+		allsamples, err := strconv.ParseInt(fields[4], 10, 64)
+		if err != nil {
+			return nil, err
+		}
 		samples = append(samples, &sample{
-			pc:      pc,
-			speedup: speedup,
-			nsPerOp: nsPerOp,
+			pc:           pc,
+			speedup:      speedup,
+			nsPerOp:      nsPerOp,
+			delaysamples: delaysamples,
+			allsamples:   allsamples,
 		})
 	}
 	return samples, scan.Err()

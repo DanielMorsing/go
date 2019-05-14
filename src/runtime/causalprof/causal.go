@@ -105,12 +105,13 @@ func profileWriter(w io.Writer) {
 		if diff == -1 {
 			continue
 		}
+		samples, allsamples := runtime_causalProfileSampleStats()
 		_func := runtime.FuncForPC(pc)
 		file, line := _func.FileLine(pc)
 		fmt.Fprintf(w, "# %s %s:%d\n", _func.Name(), file, line)
 		fmt.Fprintf(w, "# speedup %d%%\n", delaypersample/delayPerPercent)
 		fmt.Fprintf(w, "# %dns/op\n", diff)
-		fmt.Fprintf(w, "%#x %d %d\n", pc, delaypersample/delayPerPercent, diff)
+		fmt.Fprintf(w, "%#x %d %d %d %d\n", pc, delaypersample/delayPerPercent, diff, samples, allsamples)
 		// allow system state to return to normal
 		time.Sleep(1000 * (time.Second / profilingHz))
 	}
@@ -137,6 +138,7 @@ func runtime_causalProfileStart() uintptr
 func runtime_causalProfileInstall(delay uint64)
 func runtime_causalProfileGetDelay() uint64
 func runtime_causalProfileStopProf()
+func runtime_causalProfileSampleStats() (uint64, uint64)
 
 var progress int
 var progresstime time.Duration

@@ -48,6 +48,8 @@ var causalprof struct {
 	// variables used to implement causal profiling
 	delaypersample uint64  // per sample delay
 	curdelay       uint64  // the amount of delays inserted so far
+	delaysamples   uint64  // number of samples that introduced delays
+	allsamples     uint64  // number of samples in total
 	ignoredelay    uint64  // delays that need to be ignored. Usually from previous experiments
 	pc             uintptr // the line that is being experimented on
 	state          uint32  // atomic variable to make sure setup is only done once
@@ -233,6 +235,10 @@ func runtime_causalProfileStart() (pc uintptr) {
 	// set up atomic variables so that profiling signals do the slowdown
 	atomic.Store64(&causalprof.delaypersample, 0)
 	atomic.Storeuintptr(&causalprof.pc, 0)
+
+	atomic.Store64(&causalprof.delaysamples, 0)
+	atomic.Store64(&causalprof.allsamples, 0)
+
 	atomic.Store(&causalprof.state, causalprofStateAwaitingPC)
 
 	unlock(&cpuprof.lock)
@@ -291,6 +297,11 @@ func runtime_causalProfileStopProf() {
 	}
 	// if we have a profile writer waiting for a PC, wake them up
 	notewakeup(&causalprof.wait)
+}
+
+//go:linkname runtime_causalProfileSampleStats runtime/causalprof.runtime_causalProfileSampleStats
+func runtime_causalProfileSampleStats() (uint64, uint64) {
+	return atomic.Load64(&causalprof.delaysamples), atomic.Load64(&causalprof.allsamples)
 }
 
 //go:linkname runtime_pprof_runtime_cyclesPerSecond runtime/pprof.runtime_cyclesPerSecond
