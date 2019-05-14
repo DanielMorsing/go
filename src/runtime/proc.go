@@ -4065,15 +4065,15 @@ func processCausalprof(gp *g, mp *m, stk []uintptr) {
 	if pp.m.ptr() != mp || pp.status != _Prunning {
 		return
 	}
-	state := atomic.Load(&causalprof.once)
-	if state == 0 {
+	state := atomic.Load(&causalprof.state)
+	if state == causalprofStateInactive || state == causalProfStateStopped {
 		return
 	}
-	if state == 1 {
+	if state == causalprofStateAwaitingPC {
 		if len(stk) < 2 {
 			return
 		}
-		if !atomic.Cas(&causalprof.once, 1, 2) {
+		if !atomic.Cas(&causalprof.state, causalprofStateAwaitingPC, causalprofStateHavePC) {
 			return
 		}
 		chosenpc := stk[1]

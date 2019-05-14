@@ -50,7 +50,7 @@ var causalprof struct {
 	curdelay       uint64  // the amount of delays inserted so far
 	ignoredelay    uint64  // delays that need to be ignored. Usually from previous experiments
 	pc             uintptr // the line that is being experimented on
-	once           uint32  // atomic variable to make sure setup is only done once
+	state          uint32  // atomic variable to make sure setup is only done once
 	wait           note    // init goroutine waits here
 }
 
@@ -233,35 +233,35 @@ func runtime_causalProfileStart() (pc uintptr) {
 	// set up atomic variables so that profiling signals do the slowdown
 	atomic.Store64(&causalprof.delaypersample, 0)
 	atomic.Storeuintptr(&causalprof.pc, 0)
-	atomic.Store(&causalprof.once, 1)
-
-	// ugly: Part of the shutdown process for causal profiling is to send a signal on
-	// a note in case we're waiting for a PC. However, if we're not waiting
-	// then that note will be flagged and we will fail on double wakeup
-	noteclear(&causalprof.wait)
+	atomic.Store(&causalprof.state, causalprofStateAwaitingPC)
 
 	unlock(&cpuprof.lock)
 
 	// Wait for profiling signal to come and tell us which line to instrument
 	notetsleepg(&causalprof.wait, -1)
 	noteclear(&causalprof.wait)
+	if atomic.Load(&causalprof.state) == causalProfStateStopped {
+		return 0
+	}
 	pc = atomic.Loaduintptr(&causalprof.pc)
 	return pc
 }
+
+const (
+	causalprofStateInactive = iota
+	causalprofStateAwaitingPC
+	causalprofStateHavePC
+	causalProfStateStopped
+)
 
 //go:linkname runtime_causalProfileInstall runtime/causalprof.runtime_causalProfileInstall
 func runtime_causalProfileInstall(delaypersample uint64) {
 	atomic.Store64(&causalprof.delaypersample, delaypersample)
 	curdelay := atomic.Load64(&causalprof.curdelay)
 	if delaypersample == 0 {
-		atomic.Store(&causalprof.once, 0)
+		atomic.Store(&causalprof.state, causalprofStateInactive)
 		atomic.Store64(&causalprof.ignoredelay, curdelay)
 	}
-}
-
-//go:linkname runtime_causalProfileWakeup runtime/causalprof.runtime_causalProfileWakeup
-func runtime_causalProfileWakeup() {
-	notewakeup(&causalprof.wait)
 }
 
 //go:linkname runtime_causalProfileGetDelay runtime/causalprof.runtime_causalProfileGetDelay
@@ -286,6 +286,11 @@ func runtime_causalProfileStopProf() {
 	cpuprof.log = nil
 	unlock(&cpuprof.lock)
 
+	if !atomic.Cas(&causalprof.state, causalprofStateAwaitingPC, causalProfStateStopped) {
+		return
+	}
+	// if we have a profile writer waiting for a PC, wake them up
+	notewakeup(&causalprof.wait)
 }
 
 //go:linkname runtime_pprof_runtime_cyclesPerSecond runtime/pprof.runtime_cyclesPerSecond
