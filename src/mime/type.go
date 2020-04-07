@@ -61,11 +61,15 @@ var builtinTypesLower = map[string]string{
 	".gif":  "image/gif",
 	".htm":  "text/html; charset=utf-8",
 	".html": "text/html; charset=utf-8",
+	".jpeg": "image/jpeg",
 	".jpg":  "image/jpeg",
-	".js":   "application/x-javascript",
+	".js":   "text/javascript; charset=utf-8",
+	".mjs":  "text/javascript; charset=utf-8",
 	".pdf":  "application/pdf",
 	".png":  "image/png",
 	".svg":  "image/svg+xml",
+	".wasm": "application/wasm",
+	".webp": "image/webp",
 	".xml":  "text/xml; charset=utf-8",
 }
 

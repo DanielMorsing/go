@@ -34,6 +34,7 @@ import (
 	"bufio"
 	"cmd/internal/objabi"
 	"cmd/internal/sys"
+	"cmd/link/internal/sym"
 	"flag"
 	"log"
 	"os"
@@ -45,11 +46,10 @@ import (
 var (
 	pkglistfornote []byte
 	windowsgui     bool // writes a "GUI binary" instead of a "console binary"
+	ownTmpDir      bool // set to true if tmp dir created by linker (e.g. no -tmpdir)
 )
 
 func init() {
-	flag.Var(&Linkmode, "linkmode", "set link `mode`")
-	flag.Var(&Buildmode, "buildmode", "set build `mode`")
 	flag.Var(&rpath, "r", "set the ELF dynamic linker search `path` to dir1:dir2:...")
 }
 
@@ -59,7 +59,6 @@ var (
 
 	flagOutfile    = flag.String("o", "", "write output to `file`")
 	flagPluginPath = flag.String("pluginpath", "", "full path name for plugin")
-	FlagLinkshared = flag.Bool("linkshared", false, "link against installed Go shared libraries")
 
 	flagInstallSuffix = flag.String("installsuffix", "", "set package directory `suffix`")
 	flagDumpDep       = flag.Bool("dumpdep", false, "dump symbol dependency graph")
@@ -87,11 +86,11 @@ var (
 	Flag8           bool // use 64-bit addresses in symbol table
 	flagInterpreter = flag.String("I", "", "use `linker` as ELF dynamic linker")
 	FlagDebugTramp  = flag.Int("debugtramp", 0, "debug trampolines")
+	FlagStrictDups  = flag.Int("strictdups", 0, "sanity check duplicate symbol contents during object file reading (1=warn 2=err).")
+	flagNewobj      = flag.Bool("newobj", false, "use new object file format")
 
-	flagHeadtype    = flag.String("H", "", "set header `type`")
 	FlagRound       = flag.Int("R", -1, "set address rounding `quantum`")
 	FlagTextAddr    = flag.Int64("T", -1, "set text segment `address`")
-	FlagDataAddr    = flag.Int64("D", -1, "set data segment `address`")
 	flagEntrySymbol = flag.String("E", "", "set `entry` symbol name")
 
 	cpuprofile     = flag.String("cpuprofile", "", "write cpu profile to `file`")
@@ -100,8 +99,9 @@ var (
 )
 
 // Main is the main entry point for the linker code.
-func Main() {
-	ctxt := linknew(SysArch)
+func Main(arch *sys.Arch, theArch Arch) {
+	thearch = theArch
+	ctxt := linknew(arch)
 	ctxt.Bso = bufio.NewWriter(os.Stdout)
 
 	// For testing behavior of go command when tools crash silently.
@@ -113,43 +113,57 @@ func Main() {
 		}
 	}
 
+	final := gorootFinal()
+	addstrdata1(ctxt, "runtime/internal/sys.DefaultGoroot="+final)
+	addstrdata1(ctxt, "cmd/internal/objabi.defaultGOROOT="+final)
+
 	// TODO(matloob): define these above and then check flag values here
-	if SysArch.Family == sys.AMD64 && objabi.GOOS == "plan9" {
+	if ctxt.Arch.Family == sys.AMD64 && objabi.GOOS == "plan9" {
 		flag.BoolVar(&Flag8, "8", false, "use 64-bit addresses in symbol table")
 	}
+	flagHeadType := flag.String("H", "", "set header `type`")
+	flag.BoolVar(&ctxt.linkShared, "linkshared", false, "link against installed Go shared libraries")
+	flag.Var(&ctxt.LinkMode, "linkmode", "set link `mode`")
+	flag.Var(&ctxt.BuildMode, "buildmode", "set build `mode`")
+	flag.BoolVar(&ctxt.compressDWARF, "compressdwarf", true, "compress DWARF if possible")
 	objabi.Flagfn1("B", "add an ELF NT_GNU_BUILD_ID `note` when using ELF", addbuildinfo)
 	objabi.Flagfn1("L", "add specified `directory` to library path", func(a string) { Lflag(ctxt, a) })
-	objabi.Flagfn0("V", "print version and exit", doversion)
+	objabi.AddVersionFlag() // -V
 	objabi.Flagfn1("X", "add string value `definition` of the form importpath.name=value", func(s string) { addstrdata1(ctxt, s) })
 	objabi.Flagcount("v", "print link trace", &ctxt.Debugvlog)
 	objabi.Flagfn1("importcfg", "read import configuration from `file`", ctxt.readImportCfg)
 
 	objabi.Flagparse(usage)
 
-	switch *flagHeadtype {
+	switch *flagHeadType {
 	case "":
 	case "windowsgui":
-		Headtype = objabi.Hwindows
+		ctxt.HeadType = objabi.Hwindows
 		windowsgui = true
 	default:
-		if err := Headtype.Set(*flagHeadtype); err != nil {
+		if err := ctxt.HeadType.Set(*flagHeadType); err != nil {
 			Errorf(nil, "%v", err)
 			usage()
 		}
 	}
 
+	if objabi.Fieldtrack_enabled != 0 {
+		ctxt.Reachparent = make(map[*sym.Symbol]*sym.Symbol)
+	}
+	checkStrictDups = *FlagStrictDups
+
 	startProfile()
-	if Buildmode == BuildmodeUnset {
-		Buildmode = BuildmodeExe
+	if ctxt.BuildMode == BuildModeUnset {
+		ctxt.BuildMode = BuildModeExe
 	}
 
-	if Buildmode != BuildmodeShared && flag.NArg() != 1 {
+	if ctxt.BuildMode != BuildModeShared && flag.NArg() != 1 {
 		usage()
 	}
 
 	if *flagOutfile == "" {
 		*flagOutfile = "a.out"
-		if Headtype == objabi.Hwindows {
+		if ctxt.HeadType == objabi.Hwindows {
 			*flagOutfile += ".exe"
 		}
 	}
@@ -158,23 +172,23 @@ func Main() {
 
 	libinit(ctxt) // creates outfile
 
-	if Headtype == objabi.Hunknown {
-		Headtype.Set(objabi.GOOS)
+	if ctxt.HeadType == objabi.Hunknown {
+		ctxt.HeadType.Set(objabi.GOOS)
 	}
 
 	ctxt.computeTLSOffset()
-	Thearch.Archinit(ctxt)
+	thearch.Archinit(ctxt)
 
-	if *FlagLinkshared && !Iself {
+	if ctxt.linkShared && !ctxt.IsELF {
 		Exitf("-linkshared can only be used on elf systems")
 	}
 
 	if ctxt.Debugvlog != 0 {
-		ctxt.Logf("HEADER = -H%d -T0x%x -D0x%x -R0x%x\n", Headtype, uint64(*FlagTextAddr), uint64(*FlagDataAddr), uint32(*FlagRound))
+		ctxt.Logf("HEADER = -H%d -T0x%x -R0x%x\n", ctxt.HeadType, uint64(*FlagTextAddr), uint32(*FlagRound))
 	}
 
-	switch Buildmode {
-	case BuildmodeShared:
+	switch ctxt.BuildMode {
+	case BuildModeShared:
 		for i := 0; i < flag.NArg(); i++ {
 			arg := flag.Arg(i)
 			parts := strings.SplitN(arg, "=", 2)
@@ -188,48 +202,89 @@ func Main() {
 			pkglistfornote = append(pkglistfornote, '\n')
 			addlibpath(ctxt, "command line", "command line", file, pkgpath, "")
 		}
-	case BuildmodePlugin:
+	case BuildModePlugin:
 		addlibpath(ctxt, "command line", "command line", flag.Arg(0), *flagPluginPath, "")
 	default:
 		addlibpath(ctxt, "command line", "command line", flag.Arg(0), "main", "")
 	}
 	ctxt.loadlib()
 
-	ctxt.checkstrdata()
 	deadcode(ctxt)
-	fieldtrack(ctxt)
+	if *flagNewobj {
+		ctxt.loadlibfull() // XXX do it here for now
+	}
+	ctxt.linksetup()
+	ctxt.dostrdata()
+
+	dwarfGenerateDebugInfo(ctxt)
+	if objabi.Fieldtrack_enabled != 0 {
+		fieldtrack(ctxt)
+	}
+	ctxt.mangleTypeSym()
 	ctxt.callgraph()
 
 	ctxt.doelf()
-	if Headtype == objabi.Hdarwin {
+	if ctxt.HeadType == objabi.Hdarwin {
 		ctxt.domacho()
 	}
 	ctxt.dostkcheck()
-	if Headtype == objabi.Hwindows {
+	if ctxt.HeadType == objabi.Hwindows {
 		ctxt.dope()
+		ctxt.windynrelocsyms()
 	}
+	if ctxt.HeadType == objabi.Haix {
+		ctxt.doxcoff()
+	}
+
 	ctxt.addexport()
-	Thearch.Gentext(ctxt) // trampolines, call stubs, etc.
+	thearch.Gentext(ctxt) // trampolines, call stubs, etc.
 	ctxt.textbuildid()
 	ctxt.textaddress()
 	ctxt.pclntab()
 	ctxt.findfunctab()
 	ctxt.typelink()
 	ctxt.symtab()
+	ctxt.buildinfo()
 	ctxt.dodata()
-	ctxt.address()
-	ctxt.reloc()
-	Thearch.Asmb(ctxt)
+	order := ctxt.address()
+	dwarfcompress(ctxt)
+	filesize := ctxt.layout(order)
+
+	// Write out the output file.
+	// It is split into two parts (Asmb and Asmb2). The first
+	// part writes most of the content (sections and segments),
+	// for which we have computed the size and offset, in a
+	// mmap'd region. The second part writes more content, for
+	// which we don't know the size.
+	var outputMmapped bool
+	if ctxt.Arch.Family != sys.Wasm {
+		// Don't mmap if we're building for Wasm. Wasm file
+		// layout is very different so filesize is meaningless.
+		err := ctxt.Out.Mmap(filesize)
+		outputMmapped = err == nil
+	}
+	if outputMmapped {
+		// Asmb will redirect symbols to the output file mmap, and relocations
+		// will be applied directly there.
+		thearch.Asmb(ctxt)
+		ctxt.reloc()
+		ctxt.Out.Munmap()
+	} else {
+		// If we don't mmap, we need to apply relocations before
+		// writing out.
+		ctxt.reloc()
+		thearch.Asmb(ctxt)
+	}
+	thearch.Asmb2(ctxt)
+
 	ctxt.undef()
 	ctxt.hostlink()
-	ctxt.archive()
 	if ctxt.Debugvlog != 0 {
-		ctxt.Logf("%5.2f cpu time\n", Cputime())
 		ctxt.Logf("%d symbols\n", len(ctxt.Syms.Allsym))
 		ctxt.Logf("%d liveness data\n", liveness)
 	}
-
 	ctxt.Bso.Flush()
+	ctxt.archive()
 
 	errorexit()
 }
@@ -269,8 +324,13 @@ func startProfile() {
 			log.Fatalf("%v", err)
 		}
 		AtExit(func() {
-			runtime.GC() // profile all outstanding allocations
-			if err := pprof.WriteHeapProfile(f); err != nil {
+			// Profile all outstanding allocations.
+			runtime.GC()
+			// compilebench parses the memory profile to extract memstats,
+			// which are only written in the legacy pprof format.
+			// See golang.org/issue/18641 and runtime/pprof/pprof.go:writeHeap.
+			const writeLegacyFormat = 1
+			if err := pprof.Lookup("heap").WriteTo(f, writeLegacyFormat); err != nil {
 				log.Fatalf("%v", err)
 			}
 		})

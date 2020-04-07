@@ -39,7 +39,7 @@ var vc = []complex128{
 }
 
 // The expected results below were computed by the high precision calculators
-// at http://keisan.casio.com/.  More exact input values (array vc[], above)
+// at https://keisan.casio.com/.  More exact input values (array vc[], above)
 // were obtained by printing them with "%.26f".  The answers were calculated
 // to 26 digits (by using the "Digit number" drop-down control of each
 // calculator).
@@ -222,7 +222,7 @@ var pow = []complex128{
 	(-2.499956739197529585028819e+00 + 1.759751724335650228957144e+00i),
 	(7.357094338218116311191939e+04 - 5.089973412479151648145882e+04i),
 	(1.320777296067768517259592e+01 - 3.165621914333901498921986e+01i),
-	(-3.123287828297300934072149e-07 - 1.9849567521490553032502223E-7i),
+	(-3.123287828297300934072149e-07 - 1.9849567521490553032502223e-7i),
 	(8.0622651468477229614813e+04 - 7.80028727944573092944363e+04i),
 	(-1.0268824572103165858577141e+00 - 4.716844738244989776610672e-01i),
 	(-4.35953819012244175753187e+01 + 2.2036445974645306917648585e+02i),
@@ -400,8 +400,10 @@ var polarSC = []ff{
 }
 var vcPowSC = [][2]complex128{
 	{NaN(), NaN()},
+	{0, NaN()},
 }
 var powSC = []complex128{
+	NaN(),
 	NaN(),
 }
 var vcSinSC = []complex128{
@@ -433,6 +435,24 @@ var vcTanhSC = []complex128{
 }
 var tanhSC = []complex128{
 	NaN(),
+}
+
+// branch cut continuity checks
+// points on each axis at |z| > 1 are checked for one-sided continuity from both the positive and negative side
+// all possible branch cuts for the elementary functions are at one of these points
+
+var zero = 0.0
+var eps = 1.0 / (1 << 53)
+
+var branchPoints = [][2]complex128{
+	{complex(2.0, zero), complex(2.0, eps)},
+	{complex(2.0, -zero), complex(2.0, -eps)},
+	{complex(-2.0, zero), complex(-2.0, eps)},
+	{complex(-2.0, -zero), complex(-2.0, -eps)},
+	{complex(zero, 2.0), complex(eps, 2.0)},
+	{complex(-zero, 2.0), complex(-eps, 2.0)},
+	{complex(zero, -2.0), complex(eps, -2.0)},
+	{complex(-zero, -2.0), complex(-eps, -2.0)},
 }
 
 // functions borrowed from pkg/math/all_test.go
@@ -508,6 +528,11 @@ func TestAcos(t *testing.T) {
 			t.Errorf("Acos(%g) = %g, want %g", vcAcosSC[i], f, acosSC[i])
 		}
 	}
+	for _, pt := range branchPoints {
+		if f0, f1 := Acos(pt[0]), Acos(pt[1]); !cVeryclose(f0, f1) {
+			t.Errorf("Acos(%g) not continuous, got %g want %g", pt[0], f0, f1)
+		}
+	}
 }
 func TestAcosh(t *testing.T) {
 	for i := 0; i < len(vc); i++ {
@@ -518,6 +543,11 @@ func TestAcosh(t *testing.T) {
 	for i := 0; i < len(vcAcoshSC); i++ {
 		if f := Acosh(vcAcoshSC[i]); !cAlike(acoshSC[i], f) {
 			t.Errorf("Acosh(%g) = %g, want %g", vcAcoshSC[i], f, acoshSC[i])
+		}
+	}
+	for _, pt := range branchPoints {
+		if f0, f1 := Acosh(pt[0]), Acosh(pt[1]); !cVeryclose(f0, f1) {
+			t.Errorf("Acosh(%g) not continuous, got %g want %g", pt[0], f0, f1)
 		}
 	}
 }
@@ -532,6 +562,11 @@ func TestAsin(t *testing.T) {
 			t.Errorf("Asin(%g) = %g, want %g", vcAsinSC[i], f, asinSC[i])
 		}
 	}
+	for _, pt := range branchPoints {
+		if f0, f1 := Asin(pt[0]), Asin(pt[1]); !cVeryclose(f0, f1) {
+			t.Errorf("Asin(%g) not continuous, got %g want %g", pt[0], f0, f1)
+		}
+	}
 }
 func TestAsinh(t *testing.T) {
 	for i := 0; i < len(vc); i++ {
@@ -542,6 +577,11 @@ func TestAsinh(t *testing.T) {
 	for i := 0; i < len(vcAsinhSC); i++ {
 		if f := Asinh(vcAsinhSC[i]); !cAlike(asinhSC[i], f) {
 			t.Errorf("Asinh(%g) = %g, want %g", vcAsinhSC[i], f, asinhSC[i])
+		}
+	}
+	for _, pt := range branchPoints {
+		if f0, f1 := Asinh(pt[0]), Asinh(pt[1]); !cVeryclose(f0, f1) {
+			t.Errorf("Asinh(%g) not continuous, got %g want %g", pt[0], f0, f1)
 		}
 	}
 }
@@ -556,6 +596,11 @@ func TestAtan(t *testing.T) {
 			t.Errorf("Atan(%g) = %g, want %g", vcAtanSC[i], f, atanSC[i])
 		}
 	}
+	for _, pt := range branchPoints {
+		if f0, f1 := Atan(pt[0]), Atan(pt[1]); !cVeryclose(f0, f1) {
+			t.Errorf("Atan(%g) not continuous, got %g want %g", pt[0], f0, f1)
+		}
+	}
 }
 func TestAtanh(t *testing.T) {
 	for i := 0; i < len(vc); i++ {
@@ -566,6 +611,11 @@ func TestAtanh(t *testing.T) {
 	for i := 0; i < len(vcAtanhSC); i++ {
 		if f := Atanh(vcAtanhSC[i]); !cAlike(atanhSC[i], f) {
 			t.Errorf("Atanh(%g) = %g, want %g", vcAtanhSC[i], f, atanhSC[i])
+		}
+	}
+	for _, pt := range branchPoints {
+		if f0, f1 := Atanh(pt[0]), Atanh(pt[1]); !cVeryclose(f0, f1) {
+			t.Errorf("Atanh(%g) not continuous, got %g want %g", pt[0], f0, f1)
 		}
 	}
 }
@@ -635,6 +685,11 @@ func TestLog(t *testing.T) {
 			t.Errorf("Log(%g) = %g, want %g", vcLogSC[i], f, logSC[i])
 		}
 	}
+	for _, pt := range branchPoints {
+		if f0, f1 := Log(pt[0]), Log(pt[1]); !cVeryclose(f0, f1) {
+			t.Errorf("Log(%g) not continuous, got %g want %g", pt[0], f0, f1)
+		}
+	}
 }
 func TestLog10(t *testing.T) {
 	for i := 0; i < len(vc); i++ {
@@ -681,8 +736,13 @@ func TestPow(t *testing.T) {
 		}
 	}
 	for i := 0; i < len(vcPowSC); i++ {
-		if f := Pow(vcPowSC[i][0], vcPowSC[i][0]); !cAlike(powSC[i], f) {
-			t.Errorf("Pow(%g, %g) = %g, want %g", vcPowSC[i][0], vcPowSC[i][0], f, powSC[i])
+		if f := Pow(vcPowSC[i][0], vcPowSC[i][1]); !cAlike(powSC[i], f) {
+			t.Errorf("Pow(%g, %g) = %g, want %g", vcPowSC[i][0], vcPowSC[i][1], f, powSC[i])
+		}
+	}
+	for _, pt := range branchPoints {
+		if f0, f1 := Pow(pt[0], 0.1), Pow(pt[1], 0.1); !cVeryclose(f0, f1) {
+			t.Errorf("Pow(%g, 0.1) not continuous, got %g want %g", pt[0], f0, f1)
 		}
 	}
 }
@@ -731,6 +791,11 @@ func TestSqrt(t *testing.T) {
 	for i := 0; i < len(vcSqrtSC); i++ {
 		if f := Sqrt(vcSqrtSC[i]); !cAlike(sqrtSC[i], f) {
 			t.Errorf("Sqrt(%g) = %g, want %g", vcSqrtSC[i], f, sqrtSC[i])
+		}
+	}
+	for _, pt := range branchPoints {
+		if f0, f1 := Sqrt(pt[0]), Sqrt(pt[1]); !cVeryclose(f0, f1) {
+			t.Errorf("Sqrt(%g) not continuous, got %g want %g", pt[0], f0, f1)
 		}
 	}
 }

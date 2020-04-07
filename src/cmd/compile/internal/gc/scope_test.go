@@ -173,6 +173,18 @@ var testfile = []testline{
 	{line: "		fi(p)", scopes: []int{1}},
 	{line: "	}"},
 	{line: "}"},
+	{line: "func TestCaptureVar(flag bool) func() int {"},
+	{line: "	a := 1", vars: []string{"arg flag bool", "arg ~r1 func() int", "var a int"}},
+	{line: "	if flag {"},
+	{line: "		b := 2", scopes: []int{1}, vars: []string{"var b int", "var f func() int"}},
+	{line: "		f := func() int {", scopes: []int{1, 0}},
+	{line: "			return b + 1"},
+	{line: "		}"},
+	{line: "		return f", scopes: []int{1}},
+	{line: "	}"},
+	{line: "	f1(a)"},
+	{line: "	return nil"},
+	{line: "}"},
 	{line: "func main() {"},
 	{line: "	TestNestedFor()"},
 	{line: "	TestOas2()"},
@@ -184,6 +196,7 @@ var testfile = []testline{
 	{line: "	TestDiscontiguousRanges()"},
 	{line: "	TestClosureScope()"},
 	{line: "	TestEscape()"},
+	{line: "	TestCaptureVar(true)"},
 	{line: "}"},
 }
 
@@ -194,6 +207,7 @@ const detailOutput = false
 // corresponds to what we expect it to be.
 func TestScopeRanges(t *testing.T) {
 	testenv.MustHaveGoBuild(t)
+	t.Parallel()
 
 	if runtime.GOOS == "plan9" {
 		t.Skip("skipping on plan9; no DWARF symbol table in executables")
@@ -205,7 +219,7 @@ func TestScopeRanges(t *testing.T) {
 	}
 	defer os.RemoveAll(dir)
 
-	src, f := gobuild(t, dir, testfile)
+	src, f := gobuild(t, dir, false, testfile)
 	defer f.Close()
 
 	// the compiler uses forward slashes for paths even on windows
@@ -337,7 +351,6 @@ type scopexplainContext struct {
 	dwarfData   *dwarf.Data
 	dwarfReader *dwarf.Reader
 	scopegen    int
-	lines       map[line][]int
 }
 
 // readScope reads the DW_TAG_lexical_block or the DW_TAG_subprogram in
@@ -396,7 +409,7 @@ func (scope *lexblock) markLines(pcln objfile.Liner, lines map[line][]*lexblock)
 	}
 }
 
-func gobuild(t *testing.T, dir string, testfile []testline) (string, *objfile.File) {
+func gobuild(t *testing.T, dir string, optimized bool, testfile []testline) (string, *objfile.File) {
 	src := filepath.Join(dir, "test.go")
 	dst := filepath.Join(dir, "out.o")
 
@@ -410,7 +423,13 @@ func gobuild(t *testing.T, dir string, testfile []testline) (string, *objfile.Fi
 	}
 	f.Close()
 
-	cmd := exec.Command(testenv.GoToolPath(t), "build", "-gcflags=-N -l", "-o", dst, src)
+	args := []string{"build"}
+	if !optimized {
+		args = append(args, "-gcflags=-N -l")
+	}
+	args = append(args, "-o", dst, src)
+
+	cmd := exec.Command(testenv.GoToolPath(t), args...)
 	if b, err := cmd.CombinedOutput(); err != nil {
 		t.Logf("build: %s\n", string(b))
 		t.Fatal(err)
@@ -421,4 +440,54 @@ func gobuild(t *testing.T, dir string, testfile []testline) (string, *objfile.Fi
 		t.Fatal(err)
 	}
 	return src, pkg
+}
+
+// TestEmptyDwarfRanges tests that no list entry in debug_ranges has start == end.
+// See issue #23928.
+func TestEmptyDwarfRanges(t *testing.T) {
+	testenv.MustHaveGoRun(t)
+	t.Parallel()
+
+	if runtime.GOOS == "plan9" {
+		t.Skip("skipping on plan9; no DWARF symbol table in executables")
+	}
+
+	dir, err := ioutil.TempDir("", "TestEmptyDwarfRanges")
+	if err != nil {
+		t.Fatalf("could not create directory: %v", err)
+	}
+	defer os.RemoveAll(dir)
+
+	_, f := gobuild(t, dir, true, []testline{{line: "package main"}, {line: "func main(){ println(\"hello\") }"}})
+	defer f.Close()
+
+	dwarfData, err := f.DWARF()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dwarfReader := dwarfData.Reader()
+
+	for {
+		entry, err := dwarfReader.Next()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if entry == nil {
+			break
+		}
+
+		ranges, err := dwarfData.Ranges(entry)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ranges == nil {
+			continue
+		}
+
+		for _, rng := range ranges {
+			if rng[0] == rng[1] {
+				t.Errorf("range entry with start == end: %v", rng)
+			}
+		}
+	}
 }

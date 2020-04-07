@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-// +build darwin dragonfly freebsd linux nacl netbsd openbsd
+// +build darwin dragonfly freebsd linux netbsd openbsd
 
 package runtime
 
@@ -56,28 +56,22 @@ func (c *sigctxt) preparePanic(sig uint32, gp *g) {
 	pc := uintptr(c.eip())
 	sp := uintptr(c.esp())
 
-	// If we don't recognize the PC as code
-	// but we do recognize the top pointer on the stack as code,
-	// then assume this was a call to non-code and treat like
-	// pc == 0, to make unwinding show the context.
-	if pc != 0 && !findfunc(pc).valid() && findfunc(*(*uintptr)(unsafe.Pointer(sp))).valid() {
-		pc = 0
+	if shouldPushSigpanic(gp, pc, *(*uintptr)(unsafe.Pointer(sp))) {
+		c.pushCall(funcPC(sigpanic))
+	} else {
+		// Not safe to push the call. Just clobber the frame.
+		c.set_eip(uint32(funcPC(sigpanic)))
 	}
+}
 
-	// Only push runtime.sigpanic if pc != 0.
-	// If pc == 0, probably panicked because of a
-	// call to a nil func. Not pushing that onto sp will
-	// make the trace look like a call to runtime.sigpanic instead.
-	// (Otherwise the trace will end at runtime.sigpanic and we
-	// won't get to see who faulted.)
-	if pc != 0 {
-		if sys.RegSize > sys.PtrSize {
-			sp -= sys.PtrSize
-			*(*uintptr)(unsafe.Pointer(sp)) = 0
-		}
-		sp -= sys.PtrSize
-		*(*uintptr)(unsafe.Pointer(sp)) = pc
-		c.set_esp(uint32(sp))
-	}
-	c.set_eip(uint32(funcPC(sigpanic)))
+const pushCallSupported = true
+
+func (c *sigctxt) pushCall(targetPC uintptr) {
+	// Make it look like the signaled instruction called target.
+	pc := uintptr(c.eip())
+	sp := uintptr(c.esp())
+	sp -= sys.PtrSize
+	*(*uintptr)(unsafe.Pointer(sp)) = pc
+	c.set_esp(uint32(sp))
+	c.set_eip(uint32(targetPC))
 }

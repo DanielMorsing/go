@@ -7,8 +7,8 @@
 package xml
 
 // References:
-//    Annotated XML spec: http://www.xml.com/axml/testaxml.htm
-//    XML name spaces: http://www.w3.org/TR/REC-xml-names/
+//    Annotated XML spec: https://www.xml.com/axml/testaxml.htm
+//    XML name spaces: https://www.w3.org/TR/REC-xml-names/
 
 // TODO(rsc):
 //	Test error handling.
@@ -135,6 +135,23 @@ func CopyToken(t Token) Token {
 	return t
 }
 
+// A TokenReader is anything that can decode a stream of XML tokens, including a
+// Decoder.
+//
+// When Token encounters an error or end-of-file condition after successfully
+// reading a token, it returns the token. It may return the (non-nil) error from
+// the same call or return the error (and a nil token) from a subsequent call.
+// An instance of this general case is that a TokenReader returning a non-nil
+// token at the end of the token stream may return either io.EOF or a nil error.
+// The next Read should return nil, io.EOF.
+//
+// Implementations of Token are discouraged from returning a nil token with a
+// nil error. Callers should treat a return of nil, nil as indicating that
+// nothing happened; in particular it does not indicate EOF.
+type TokenReader interface {
+	Token() (Token, error)
+}
+
 // A Decoder represents an XML parser reading a particular input stream.
 // The parser assumes that its input is encoded in UTF-8.
 type Decoder struct {
@@ -150,9 +167,9 @@ type Decoder struct {
 	//
 	// Setting:
 	//
-	//	d.Strict = false;
-	//	d.AutoClose = HTMLAutoClose;
-	//	d.Entity = HTMLEntity
+	//	d.Strict = false
+	//	d.AutoClose = xml.HTMLAutoClose
+	//	d.Entity = xml.HTMLEntity
 	//
 	// creates a parser that can handle typical HTML.
 	//
@@ -181,7 +198,7 @@ type Decoder struct {
 	// charset-conversion readers, converting from the provided
 	// non-UTF-8 charset into UTF-8. If CharsetReader is nil or
 	// returns an error, parsing stops with an error. One of the
-	// the CharsetReader's result values must be non-nil.
+	// CharsetReader's result values must be non-nil.
 	CharsetReader func(charset string, input io.Reader) (io.Reader, error)
 
 	// DefaultSpace sets the default name space used for unadorned tags,
@@ -190,6 +207,7 @@ type Decoder struct {
 	DefaultSpace string
 
 	r              io.ByteReader
+	t              TokenReader
 	buf            bytes.Buffer
 	saved          *bytes.Buffer
 	stk            *stack
@@ -219,6 +237,22 @@ func NewDecoder(r io.Reader) *Decoder {
 	return d
 }
 
+// NewTokenDecoder creates a new XML parser using an underlying token stream.
+func NewTokenDecoder(t TokenReader) *Decoder {
+	// Is it already a Decoder?
+	if d, ok := t.(*Decoder); ok {
+		return d
+	}
+	d := &Decoder{
+		ns:       make(map[string]string),
+		t:        t,
+		nextByte: -1,
+		line:     1,
+		Strict:   true,
+	}
+	return d
+}
+
 // Token returns the next XML token in the input stream.
 // At the end of the input stream, Token returns nil, io.EOF.
 //
@@ -237,7 +271,7 @@ func NewDecoder(r io.Reader) *Decoder {
 // it will return an error.
 //
 // Token implements XML name spaces as described by
-// http://www.w3.org/TR/REC-xml-names/.  Each of the
+// https://www.w3.org/TR/REC-xml-names/.  Each of the
 // Name structures contained in the Token has the Space
 // set to the URL identifying its name space when known.
 // If Token encounters an unrecognized name space prefix,
@@ -252,7 +286,10 @@ func (d *Decoder) Token() (Token, error) {
 		t = d.nextToken
 		d.nextToken = nil
 	} else if t, err = d.rawToken(); err != nil {
-		if err == io.EOF && d.stk != nil && d.stk.kind != stkEOF {
+		switch {
+		case err == io.EOF && d.t != nil:
+			err = nil
+		case err == io.EOF && d.stk != nil && d.stk.kind != stkEOF:
 			err = d.syntaxError("unexpected EOF")
 		}
 		return t, err
@@ -304,6 +341,7 @@ func (d *Decoder) Token() (Token, error) {
 const (
 	xmlURL      = "http://www.w3.org/XML/1998/namespace"
 	xmlnsPrefix = "xmlns"
+	xmlPrefix   = "xml"
 )
 
 // Apply name space translation to name n.
@@ -315,7 +353,7 @@ func (d *Decoder) translate(n *Name, isElementName bool) {
 		return
 	case n.Space == "" && !isElementName:
 		return
-	case n.Space == xmlNamespacePrefix:
+	case n.Space == xmlPrefix:
 		n.Space = xmlURL
 	case n.Space == "" && n.Local == xmlnsPrefix:
 		return
@@ -511,6 +549,9 @@ func (d *Decoder) RawToken() (Token, error) {
 }
 
 func (d *Decoder) rawToken() (Token, error) {
+	if d.t != nil {
+		return d.t.Token()
+	}
 	if d.err != nil {
 		return nil, d.err
 	}
@@ -768,18 +809,7 @@ func (d *Decoder) rawToken() (Token, error) {
 		}
 		d.ungetc(b)
 
-		n := len(attr)
-		if n >= cap(attr) {
-			nCap := 2 * cap(attr)
-			if nCap == 0 {
-				nCap = 4
-			}
-			nattr := make([]Attr, n, nCap)
-			copy(nattr, attr)
-			attr = nattr
-		}
-		attr = attr[0 : n+1]
-		a := &attr[n]
+		a := Attr{}
 		if a.Name, ok = d.nsname(); !ok {
 			if d.err == nil {
 				d.err = d.syntaxError("expected attribute name in element")
@@ -805,6 +835,7 @@ func (d *Decoder) rawToken() (Token, error) {
 			}
 			a.Value = string(data)
 		}
+		attr = append(attr, a)
 	}
 	if empty {
 		d.needClose = true
@@ -835,7 +866,7 @@ func (d *Decoder) attrval() []byte {
 		if !ok {
 			return nil
 		}
-		// http://www.w3.org/TR/REC-html40/intro/sgmltut.html#h-3.2.2
+		// https://www.w3.org/TR/REC-html40/intro/sgmltut.html#h-3.2.2
 		if 'a' <= b && b <= 'z' || 'A' <= b && b <= 'Z' ||
 			'0' <= b && b <= '9' || b == '_' || b == ':' || b == '-' {
 			d.buf.WriteByte(b)
@@ -1106,13 +1137,13 @@ Input:
 }
 
 // Decide whether the given rune is in the XML Character Range, per
-// the Char production of http://www.xml.com/axml/testaxml.htm,
+// the Char production of https://www.xml.com/axml/testaxml.htm,
 // Section 2.2 Characters.
 func isInCharacterRange(r rune) (inrange bool) {
 	return r == 0x09 ||
 		r == 0x0A ||
 		r == 0x0D ||
-		r >= 0x20 && r <= 0xDF77 ||
+		r >= 0x20 && r <= 0xD7FF ||
 		r >= 0xE000 && r <= 0xFFFD ||
 		r >= 0x10000 && r <= 0x10FFFF
 }
@@ -1235,7 +1266,7 @@ func isNameString(s string) bool {
 }
 
 // These tables were generated by cut and paste from Appendix B of
-// the XML spec at http://www.xml.com/axml/testaxml.htm
+// the XML spec at https://www.xml.com/axml/testaxml.htm
 // and then reformatting. First corresponds to (Letter | '_' | ':')
 // and second corresponds to NameChar.
 
@@ -1553,7 +1584,9 @@ var second = &unicode.RangeTable{
 
 // HTMLEntity is an entity map containing translations for the
 // standard HTML entity characters.
-var HTMLEntity = htmlEntity
+//
+// See the Decoder.Strict and Decoder.Entity fields' documentation.
+var HTMLEntity map[string]string = htmlEntity
 
 var htmlEntity = map[string]string{
 	/*
@@ -1820,7 +1853,9 @@ var htmlEntity = map[string]string{
 
 // HTMLAutoClose is the set of HTML elements that
 // should be considered to close automatically.
-var HTMLAutoClose = htmlAutoClose
+//
+// See the Decoder.Strict and Decoder.Entity fields' documentation.
+var HTMLAutoClose []string = htmlAutoClose
 
 var htmlAutoClose = []string{
 	/*
@@ -1904,10 +1939,8 @@ func escapeText(w io.Writer, s []byte, escapeNewline bool) error {
 		}
 		last = i
 	}
-	if _, err := w.Write(s[last:]); err != nil {
-		return err
-	}
-	return nil
+	_, err := w.Write(s[last:])
+	return err
 }
 
 // EscapeString writes to p the properly escaped XML equivalent
@@ -1990,10 +2023,8 @@ func emitCDATA(w io.Writer, s []byte) error {
 		}
 		s = s[i:]
 	}
-	if _, err := w.Write(cdataEnd); err != nil {
-		return err
-	}
-	return nil
+	_, err := w.Write(cdataEnd)
+	return err
 }
 
 // procInst parses the `param="..."` or `param='...'`

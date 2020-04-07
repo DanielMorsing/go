@@ -10,6 +10,7 @@ import (
 	"os"
 	"runtime"
 	"syscall"
+	"time"
 	"unsafe"
 )
 
@@ -31,7 +32,7 @@ type netFD struct {
 	// immutable until Close
 	family      int
 	sotype      int
-	isConnected bool
+	isConnected bool // handshake completed or use of association with peer
 	net         string
 	laddr       Addr
 	raddr       Addr
@@ -52,7 +53,7 @@ func newFD(sysfd syscall.Handle, family, sotype int, net string) (*netFD, error)
 }
 
 func (fd *netFD) init() error {
-	errcall, err := fd.pfd.Init(fd.net)
+	errcall, err := fd.pfd.Init(fd.net, true)
 	if errcall != "" {
 		err = wrapSyscallError(errcall, err)
 	}
@@ -223,6 +224,18 @@ func (fd *netFD) accept() (*netFD, error) {
 	return netfd, nil
 }
 
+func (fd *netFD) readMsg(p []byte, oob []byte) (n, oobn, flags int, sa syscall.Sockaddr, err error) {
+	n, oobn, flags, sa, err = fd.pfd.ReadMsg(p, oob)
+	runtime.KeepAlive(fd)
+	return n, oobn, flags, sa, wrapSyscallError("wsarecvmsg", err)
+}
+
+func (fd *netFD) writeMsg(p []byte, oob []byte, sa syscall.Sockaddr) (n int, oobn int, err error) {
+	n, oobn, err = fd.pfd.WriteMsg(p, oob, sa)
+	runtime.KeepAlive(fd)
+	return n, oobn, wrapSyscallError("wsasendmsg", err)
+}
+
 // Unimplemented functions.
 
 func (fd *netFD) dup() (*os.File, error) {
@@ -230,10 +243,14 @@ func (fd *netFD) dup() (*os.File, error) {
 	return nil, syscall.EWINDOWS
 }
 
-func (fd *netFD) readMsg(p []byte, oob []byte) (n, oobn, flags int, sa syscall.Sockaddr, err error) {
-	return 0, 0, 0, nil, syscall.EWINDOWS
+func (fd *netFD) SetDeadline(t time.Time) error {
+	return fd.pfd.SetDeadline(t)
 }
 
-func (fd *netFD) writeMsg(p []byte, oob []byte, sa syscall.Sockaddr) (n int, oobn int, err error) {
-	return 0, 0, syscall.EWINDOWS
+func (fd *netFD) SetReadDeadline(t time.Time) error {
+	return fd.pfd.SetReadDeadline(t)
+}
+
+func (fd *netFD) SetWriteDeadline(t time.Time) error {
+	return fd.pfd.SetWriteDeadline(t)
 }

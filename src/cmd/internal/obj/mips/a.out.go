@@ -46,7 +46,7 @@ const (
 )
 
 const (
-	REG_R0 = obj.RBaseMIPS + iota
+	REG_R0 = obj.RBaseMIPS + iota // must be a multiple of 32
 	REG_R1
 	REG_R2
 	REG_R3
@@ -79,7 +79,7 @@ const (
 	REG_R30
 	REG_R31
 
-	REG_F0
+	REG_F0 // must be a multiple of 32
 	REG_F1
 	REG_F2
 	REG_F3
@@ -112,11 +112,8 @@ const (
 	REG_F30
 	REG_F31
 
-	REG_HI
-	REG_LO
-
 	// co-processor 0 control registers
-	REG_M0
+	REG_M0 // must be a multiple of 32
 	REG_M1
 	REG_M2
 	REG_M3
@@ -150,7 +147,7 @@ const (
 	REG_M31
 
 	// FPU control registers
-	REG_FCR0
+	REG_FCR0 // must be a multiple of 32
 	REG_FCR1
 	REG_FCR2
 	REG_FCR3
@@ -183,7 +180,10 @@ const (
 	REG_FCR30
 	REG_FCR31
 
-	REG_LAST = REG_FCR31 // the last defined register
+	REG_HI
+	REG_LO
+
+	REG_LAST = REG_LO // the last defined register
 
 	REG_SPECIAL = REG_M0
 
@@ -200,6 +200,24 @@ const (
 	REGTMP  = REG_R23 /* used by the linker */
 	FREGRET = REG_F0
 )
+
+// https://llvm.org/svn/llvm-project/llvm/trunk/lib/Target/Mips/MipsRegisterInfo.td search for DwarfRegNum
+// https://gcc.gnu.org/viewcvs/gcc/trunk/gcc/config/mips/mips.c?view=co&revision=258099&content-type=text%2Fplain search for mips_dwarf_regno
+// For now, this is adequate for both 32 and 64 bit.
+var MIPSDWARFRegisters = map[int16]int16{}
+
+func init() {
+	// f assigns dwarfregisters[from:to] = (base):(to-from+base)
+	f := func(from, to, base int16) {
+		for r := int16(from); r <= to; r++ {
+			MIPSDWARFRegisters[r] = (r - from) + base
+		}
+	}
+	f(REG_R0, REG_R31, 0)
+	f(REG_F0, REG_F31, 32) // For 32-bit MIPS, compiler only uses even numbered registers --  see cmd/compile/internal/ssa/gen/MIPSOps.go
+	MIPSDWARFRegisters[REG_HI] = 64
+	MIPSDWARFRegisters[REG_LO] = 65
+}
 
 const (
 	BIG = 32766
@@ -301,6 +319,7 @@ const (
 	ALL
 	ALLV
 	ALUI
+	AMADD
 	AMOVB
 	AMOVBU
 	AMOVD
@@ -316,6 +335,7 @@ const (
 	AMOVWF
 	AMOVWL
 	AMOVWR
+	AMSUB
 	AMUL
 	AMULD
 	AMULF
@@ -324,6 +344,7 @@ const (
 	ANEGD
 	ANEGF
 	ANEGW
+	ANEGV
 	ANOOP // hardware nop
 	ANOR
 	AOR
@@ -391,3 +412,22 @@ const (
 	AJAL = obj.ACALL
 	ARET = obj.ARET
 )
+
+func init() {
+	// The asm encoder generally assumes that the lowest 5 bits of the
+	// REG_XX constants match the machine instruction encoding, i.e.
+	// the lowest 5 bits is the register number.
+	// Check this here.
+	if REG_R0%32 != 0 {
+		panic("REG_R0 is not a multiple of 32")
+	}
+	if REG_F0%32 != 0 {
+		panic("REG_F0 is not a multiple of 32")
+	}
+	if REG_M0%32 != 0 {
+		panic("REG_M0 is not a multiple of 32")
+	}
+	if REG_FCR0%32 != 0 {
+		panic("REG_FCR0 is not a multiple of 32")
+	}
+}

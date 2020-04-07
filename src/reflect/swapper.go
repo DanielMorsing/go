@@ -29,7 +29,7 @@ func Swapper(slice interface{}) func(i, j int) {
 
 	typ := v.Type().Elem().(*rtype)
 	size := typ.Size()
-	hasPtr := typ.kind&kindNoPointers == 0
+	hasPtr := typ.ptrdata != 0
 
 	// Some common & small cases, without using memmove:
 	if hasPtr {
@@ -65,8 +65,8 @@ func Swapper(slice interface{}) func(i, j int) {
 		if uint(i) >= uint(s.Len) || uint(j) >= uint(s.Len) {
 			panic("reflect: slice index out of range")
 		}
-		val1 := arrayAt(s.Data, i, size)
-		val2 := arrayAt(s.Data, j, size)
+		val1 := arrayAt(s.Data, i, size, "i < s.Len")
+		val2 := arrayAt(s.Data, j, size, "j < s.Len")
 		typedmemmove(typ, tmp, val1)
 		typedmemmove(typ, val1, val2)
 		typedmemmove(typ, val2, tmp)

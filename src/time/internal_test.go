@@ -9,6 +9,25 @@ func init() {
 	ForceUSPacificForTesting()
 }
 
+func initTestingZone() {
+	z, err := loadLocation("America/Los_Angeles", zoneSources[len(zoneSources)-1:])
+	if err != nil {
+		panic("cannot load America/Los_Angeles for testing: " + err.Error())
+	}
+	z.name = "Local"
+	localLoc = *z
+}
+
+var OrigZoneSources = zoneSources
+
+func forceZipFileForTesting(zipOnly bool) {
+	zoneSources = make([]string, len(OrigZoneSources))
+	copy(zoneSources, OrigZoneSources)
+	if zipOnly {
+		zoneSources = zoneSources[len(zoneSources)-1:]
+	}
+}
+
 var Interrupt = interrupt
 var DaysIn = daysIn
 
@@ -45,8 +64,7 @@ func CheckRuntimeTimerOverflow() {
 		// once more.
 		stopTimer(r)
 		t.Stop()
-		r.when = 0
-		startTimer(r)
+		resetTimer(r, 0)
 	}()
 
 	// If the test fails, we will hang here until the timeout in the testing package
@@ -57,3 +75,8 @@ func CheckRuntimeTimerOverflow() {
 	// So we fall back to hope: We hope we don't hang here.
 	<-t.C
 }
+
+var (
+	MinMonoTime = Time{wall: 1 << 63, ext: -1 << 63, loc: UTC}
+	MaxMonoTime = Time{wall: 1 << 63, ext: 1<<63 - 1, loc: UTC}
+)

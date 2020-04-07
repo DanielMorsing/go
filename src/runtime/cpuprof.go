@@ -36,12 +36,31 @@ type cpuProfile struct {
 	// 300 words per second.
 	// Hopefully a normal Go thread will get the profiling
 	// signal at least once every few seconds.
-	extra     [1000]uintptr
-	numExtra  int
-	lostExtra uint64 // count of frames lost because extra is full
+	extra      [1000]uintptr
+	numExtra   int
+	lostExtra  uint64 // count of frames lost because extra is full
+	lostAtomic uint64 // count of frames lost because of being in atomic64 on mips/arm; updated racily
 }
 
 var cpuprof cpuProfile
+
+var causalprof struct {
+	// variables used to implement causal profiling
+	delaypersample uint64  // per sample delay
+	curdelay       uint64  // the amount of delays inserted so far
+	delaysamples   uint64  // number of samples that introduced delays
+	allsamples     uint64  // number of samples in total
+	ignoredelay    uint64  // delays that need to be ignored. Usually from previous experiments
+	pc             uintptr // the line that is being experimented on
+	state          uint32  // atomic variable to make sure setup is only done once
+	wait           note    // init goroutine waits here
+}
+
+const (
+	noExp uint32 = iota
+	setupExp
+	hasExp
+)
 
 // SetCPUProfileRate sets the CPU profiling rate to hz samples per second.
 // If hz <= 0, SetCPUProfileRate turns off profiling.
@@ -94,7 +113,7 @@ func (p *cpuProfile) add(gp *g, stk []uintptr) {
 	}
 
 	if prof.hz != 0 { // implies cpuprof.log != nil
-		if p.numExtra > 0 || p.lostExtra > 0 {
+		if p.numExtra > 0 || p.lostExtra > 0 || p.lostAtomic > 0 {
 			p.addExtra()
 		}
 		hdr := [1]uint64{1}
@@ -159,17 +178,20 @@ func (p *cpuProfile) addExtra() {
 			funcPC(_LostExternalCode) + sys.PCQuantum,
 			funcPC(_ExternalCode) + sys.PCQuantum,
 		}
-		cpuprof.log.write(nil, 0, hdr[:], lostStk[:])
+		p.log.write(nil, 0, hdr[:], lostStk[:])
+		p.lostExtra = 0
 	}
-}
 
-func (p *cpuProfile) addLostAtomic64(count uint64) {
-	hdr := [1]uint64{count}
-	lostStk := [2]uintptr{
-		funcPC(_LostSIGPROFDuringAtomic64) + sys.PCQuantum,
-		funcPC(_System) + sys.PCQuantum,
+	if p.lostAtomic > 0 {
+		hdr := [1]uint64{p.lostAtomic}
+		lostStk := [2]uintptr{
+			funcPC(_LostSIGPROFDuringAtomic64) + sys.PCQuantum,
+			funcPC(_System) + sys.PCQuantum,
+		}
+		p.log.write(nil, 0, hdr[:], lostStk[:])
+		p.lostAtomic = 0
 	}
-	cpuprof.log.write(nil, 0, hdr[:], lostStk[:])
+
 }
 
 // CPUProfile panics.
@@ -178,11 +200,108 @@ func (p *cpuProfile) addLostAtomic64(count uint64) {
 // The details of generating that format have changed,
 // so this functionality has been removed.
 //
-// Deprecated: use the runtime/pprof package,
+// Deprecated: Use the runtime/pprof package,
 // or the handlers in the net/http/pprof package,
 // or the testing package's -test.cpuprofile flag instead.
 func CPUProfile() []byte {
 	panic("CPUProfile no longer available")
+}
+
+// Causal profiling helper functions
+//
+// Causal profiling is initialized through the following steps.
+// When we're calling this function, CPU profiling will have been turned on.
+// We set the 'once' variable and then go to sleep. Once the profiler gets a signal,
+// it will check the variable, set the PC for the callsite we're instrumenting and
+// then wake up this goroutine. We use the profiler to select a callsite so that
+// we can be certain that the speedup can be realized.
+//
+// Once we're woken up, we read the PC, figure out which experiment to run
+// and then use causalProfileInstall to set the delay per sample.
+//
+// We end an experiment by setting the delay per sample to 0. At that point,
+// everything should function as normal.
+//
+// All of these variables are checked concurrently by other threads and profiling signals
+// so we use atomic variables here.
+//go:linkname runtime_causalProfileStart runtime/causalprof.runtime_causalProfileStart
+func runtime_causalProfileStart() (pc uintptr) {
+
+	lock(&cpuprof.lock)
+	if !cpuprof.on {
+		unlock(&cpuprof.lock)
+		return 0
+	}
+	// set up atomic variables so that profiling signals do the slowdown
+	atomic.Store64(&causalprof.delaypersample, 0)
+	atomic.Storeuintptr(&causalprof.pc, 0)
+
+	atomic.Store64(&causalprof.delaysamples, 0)
+	atomic.Store64(&causalprof.allsamples, 0)
+
+	atomic.Store(&causalprof.state, causalprofStateAwaitingPC)
+
+	unlock(&cpuprof.lock)
+
+	// Wait for profiling signal to come and tell us which line to instrument
+	notetsleepg(&causalprof.wait, -1)
+	noteclear(&causalprof.wait)
+	if atomic.Load(&causalprof.state) == causalProfStateStopped {
+		return 0
+	}
+	pc = atomic.Loaduintptr(&causalprof.pc)
+	return pc
+}
+
+const (
+	causalprofStateInactive = iota
+	causalprofStateAwaitingPC
+	causalprofStateHavePC
+	causalProfStateStopped
+)
+
+//go:linkname runtime_causalProfileInstall runtime/causalprof.runtime_causalProfileInstall
+func runtime_causalProfileInstall(delaypersample uint64) {
+	atomic.Store64(&causalprof.delaypersample, delaypersample)
+	curdelay := atomic.Load64(&causalprof.curdelay)
+	if delaypersample == 0 {
+		atomic.Store(&causalprof.state, causalprofStateInactive)
+		atomic.Store64(&causalprof.ignoredelay, curdelay)
+	}
+}
+
+//go:linkname runtime_causalProfileGetDelay runtime/causalprof.runtime_causalProfileGetDelay
+func runtime_causalProfileGetDelay() uint64 {
+	return atomic.Load64(&causalprof.curdelay)
+}
+
+// stop the profiler and discard the profile buffer atomically.
+//
+// Causal profiling uses the profiling system, but does not read records
+// written by it. After a profile has been stopped, the profiler will let data
+// sit in the buffer, waiting for a reader to empty it before it will let profiling
+// be turned on again. We have to empty out the buffer and stop the profiler
+// atomically, since there's a small window between causal prof stopping and clearing
+// the buffer where a profiler might encounter our dirty data.
+//
+//go:linkname runtime_causalProfileStopProf runtime/causalprof.runtime_causalProfileStopProf
+func runtime_causalProfileStopProf() {
+	lock(&cpuprof.lock)
+	setcpuprofilerate(0)
+	cpuprof.on = false
+	cpuprof.log = nil
+	unlock(&cpuprof.lock)
+
+	if !atomic.Cas(&causalprof.state, causalprofStateAwaitingPC, causalProfStateStopped) {
+		return
+	}
+	// if we have a profile writer waiting for a PC, wake them up
+	notewakeup(&causalprof.wait)
+}
+
+//go:linkname runtime_causalProfileSampleStats runtime/causalprof.runtime_causalProfileSampleStats
+func runtime_causalProfileSampleStats() (uint64, uint64) {
+	return atomic.Load64(&causalprof.delaysamples), atomic.Load64(&causalprof.allsamples)
 }
 
 //go:linkname runtime_pprof_runtime_cyclesPerSecond runtime/pprof.runtime_cyclesPerSecond

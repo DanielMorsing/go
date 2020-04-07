@@ -33,13 +33,13 @@ const (
 	fAttr
 	fCDATA
 	fCharData
-	fInnerXml
+	fInnerXML
 	fComment
 	fAny
 
 	fOmitEmpty
 
-	fMode = fElement | fAttr | fCDATA | fCharData | fInnerXml | fComment | fAny
+	fMode = fElement | fAttr | fCDATA | fCharData | fInnerXML | fComment | fAny
 
 	xmlName = "XMLName"
 )
@@ -134,7 +134,7 @@ func structFieldInfo(typ reflect.Type, f *reflect.StructField) (*fieldInfo, erro
 			case "chardata":
 				finfo.flags |= fCharData
 			case "innerxml":
-				finfo.flags |= fInnerXml
+				finfo.flags |= fInnerXML
 			case "comment":
 				finfo.flags |= fComment
 			case "any":
@@ -149,7 +149,7 @@ func structFieldInfo(typ reflect.Type, f *reflect.StructField) (*fieldInfo, erro
 		switch mode := finfo.flags & fMode; mode {
 		case 0:
 			finfo.flags |= fElement
-		case fAttr, fCDATA, fCharData, fInnerXml, fComment, fAny, fAny | fAttr:
+		case fAttr, fCDATA, fCharData, fInnerXML, fComment, fAny, fAny | fAttr:
 			if f.Name == xmlName || tag != "" && mode != fAttr {
 				valid = false
 			}
@@ -241,7 +241,7 @@ func lookupXMLName(typ reflect.Type) (xmlname *fieldInfo) {
 			continue
 		}
 		finfo, err := structFieldInfo(typ, &f)
-		if finfo.name != "" && err == nil {
+		if err == nil && finfo.name != "" {
 			return finfo
 		}
 		// Also consider errors as a non-existent field tag

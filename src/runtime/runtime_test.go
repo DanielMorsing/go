@@ -5,16 +5,16 @@
 package runtime_test
 
 import (
-	"bytes"
-	"internal/testenv"
+	"flag"
 	"io"
-	"os/exec"
 	. "runtime"
 	"runtime/debug"
 	"strings"
 	"testing"
 	"unsafe"
 )
+
+var flagQuick = flag.Bool("quick", false, "skip slow tests, for second run in all.bash")
 
 func init() {
 	// We're testing the runtime, so make tracebacks show things
@@ -70,6 +70,18 @@ func BenchmarkEfaceCmpDiff(b *testing.B) {
 	}
 }
 
+func BenchmarkEfaceCmpDiffIndirect(b *testing.B) {
+	efaceCmp1 = [2]int{1, 2}
+	efaceCmp2 = [2]int{1, 2}
+	for i := 0; i < b.N; i++ {
+		for j := 0; j < 100; j++ {
+			if efaceCmp1 != efaceCmp2 {
+				b.Fatal("bad comparison")
+			}
+		}
+	}
+}
+
 func BenchmarkDefer(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		defer1()
@@ -108,6 +120,21 @@ func BenchmarkDeferMany(b *testing.B) {
 			}
 		}(1, 2, 3)
 	}
+}
+
+func BenchmarkPanicRecover(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		defer3()
+	}
+}
+
+func defer3() {
+	defer func(x, y, z int) {
+		if recover() == nil {
+			panic("failed recover")
+		}
+	}(1, 2, 3)
+	panic("hi")
 }
 
 // golang.org/issue/7063
@@ -165,9 +192,13 @@ func TestSetPanicOnFault(t *testing.T) {
 	}
 }
 
+// testSetPanicOnFault tests one potentially faulting address.
+// It deliberately constructs and uses an invalid pointer,
+// so mark it as nocheckptr.
+//go:nocheckptr
 func testSetPanicOnFault(t *testing.T, addr uintptr, nfault *int) {
-	if GOOS == "nacl" {
-		t.Skip("nacl doesn't seem to fault on high addresses")
+	if GOOS == "js" {
+		t.Skip("js does not support catching faults")
 	}
 
 	defer func() {
@@ -263,32 +294,6 @@ func TestTrailingZero(t *testing.T) {
 	}
 }
 
-func TestBadOpen(t *testing.T) {
-	if GOOS == "windows" || GOOS == "nacl" {
-		t.Skip("skipping OS that doesn't have open/read/write/close")
-	}
-	// make sure we get the correct error code if open fails. Same for
-	// read/write/close on the resulting -1 fd. See issue 10052.
-	nonfile := []byte("/notreallyafile")
-	fd := Open(&nonfile[0], 0, 0)
-	if fd != -1 {
-		t.Errorf("open(\"%s\")=%d, want -1", string(nonfile), fd)
-	}
-	var buf [32]byte
-	r := Read(-1, unsafe.Pointer(&buf[0]), int32(len(buf)))
-	if r != -1 {
-		t.Errorf("read()=%d, want -1", r)
-	}
-	w := Write(^uintptr(0), unsafe.Pointer(&buf[0]), int32(len(buf)))
-	if w != -1 {
-		t.Errorf("write()=%d, want -1", w)
-	}
-	c := Close(-1)
-	if c != -1 {
-		t.Errorf("close()=%d, want -1", c)
-	}
-}
-
 func TestAppendGrowth(t *testing.T) {
 	var x []int64
 	check := func(want int) {
@@ -355,44 +360,5 @@ func TestVersion(t *testing.T) {
 	vers := Version()
 	if strings.Contains(vers, "\r") || strings.Contains(vers, "\n") {
 		t.Fatalf("cr/nl in version: %q", vers)
-	}
-}
-
-// TestIntendedInlining tests that specific runtime functions are inlined.
-// This allows refactoring for code clarity and re-use without fear that
-// changes to the compiler will cause silent performance regressions.
-func TestIntendedInlining(t *testing.T) {
-	if testing.Short() && testenv.Builder() == "" {
-		t.Skip("skipping in short mode")
-	}
-	testenv.MustHaveGoRun(t)
-	t.Parallel()
-
-	// want is the list of function names that should be inlined.
-	want := []string{"tophash", "add", "(*bmap).keys", "bucketShift", "bucketMask"}
-
-	m := make(map[string]bool, len(want))
-	for _, s := range want {
-		m[s] = true
-	}
-
-	cmd := testEnv(exec.Command(testenv.GoToolPath(t), "build", "-a", "-gcflags=-m", "runtime"))
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Logf("%s", out)
-		t.Fatal(err)
-	}
-	lines := bytes.Split(out, []byte{'\n'})
-	for _, x := range lines {
-		f := bytes.Split(x, []byte(": can inline "))
-		if len(f) < 2 {
-			continue
-		}
-		fn := bytes.TrimSpace(f[1])
-		delete(m, string(fn))
-	}
-
-	for s := range m {
-		t.Errorf("function %s not inlined", s)
 	}
 }

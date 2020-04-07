@@ -40,23 +40,23 @@ type Disasm struct {
 }
 
 // Disasm returns a disassembler for the file f.
-func (f *File) Disasm() (*Disasm, error) {
-	syms, err := f.Symbols()
+func (e *Entry) Disasm() (*Disasm, error) {
+	syms, err := e.Symbols()
 	if err != nil {
 		return nil, err
 	}
 
-	pcln, err := f.PCLineTable()
+	pcln, err := e.PCLineTable()
 	if err != nil {
 		return nil, err
 	}
 
-	textStart, textBytes, err := f.Text()
+	textStart, textBytes, err := e.Text()
 	if err != nil {
 		return nil, err
 	}
 
-	goarch := f.GOARCH()
+	goarch := e.GOARCH()
 	disasm := disasms[goarch]
 	byteOrder := byteOrders[goarch]
 	if disasm == nil || byteOrder == nil {
@@ -130,9 +130,9 @@ func NewFileCache(maxLen int) *FileCache {
 }
 
 // Line returns the source code line for the given file and line number.
-// If the file is not already cached, reads it , inserts it into the cache,
+// If the file is not already cached, reads it, inserts it into the cache,
 // and removes the least recently used file if necessary.
-// If the file is in cache, moves it up to the front of the list.
+// If the file is in cache, it is moved to the front of the list.
 func (fc *FileCache) Line(filename string, line int) ([]byte, error) {
 	if filepath.Ext(filename) != ".go" {
 		return nil, nil
@@ -141,11 +141,9 @@ func (fc *FileCache) Line(filename string, line int) ([]byte, error) {
 	// Clean filenames returned by src.Pos.SymFilename()
 	// or src.PosBase.SymFilename() removing
 	// the leading src.FileSymPrefix.
-	if strings.HasPrefix(filename, src.FileSymPrefix) {
-		filename = filename[len(src.FileSymPrefix):]
-	}
+	filename = strings.TrimPrefix(filename, src.FileSymPrefix)
 
-	// Expand literal "$GOROOT" rewrited by obj.AbsFile()
+	// Expand literal "$GOROOT" rewritten by obj.AbsFile()
 	filename = filepath.Clean(os.ExpandEnv(filename))
 
 	var cf *CachedFile
@@ -199,6 +197,7 @@ func (d *Disasm) Print(w io.Writer, filter *regexp.Regexp, start, end uint64, pr
 		fc = NewFileCache(8)
 	}
 
+	tw := tabwriter.NewWriter(bw, 18, 8, 1, '\t', tabwriter.StripEscape)
 	for _, sym := range d.syms {
 		symStart := sym.Addr
 		symEnd := sym.Addr + uint64(sym.Size)
@@ -217,7 +216,6 @@ func (d *Disasm) Print(w io.Writer, filter *regexp.Regexp, start, end uint64, pr
 		file, _, _ := d.pcln.PCToLine(sym.Addr)
 		fmt.Fprintf(bw, "TEXT %s(SB) %s\n", sym.Name, file)
 
-		tw := tabwriter.NewWriter(bw, 18, 8, 1, '\t', tabwriter.StripEscape)
 		if symEnd > end {
 			symEnd = end
 		}
@@ -255,7 +253,7 @@ func (d *Disasm) Print(w io.Writer, filter *regexp.Regexp, start, end uint64, pr
 					fmt.Fprintf(tw, "%08x", d.byteOrder.Uint32(code[i+j:]))
 				}
 			}
-			fmt.Fprintf(tw, "\t%s\n", text)
+			fmt.Fprintf(tw, "\t%s\t\n", text)
 		})
 		tw.Flush()
 	}
@@ -276,15 +274,10 @@ func (d *Disasm) Decode(start, end uint64, relocs []Reloc, f func(pc, size uint6
 		i := pc - d.textStart
 		text, size := d.disasm(code[i:], pc, lookup, d.byteOrder)
 		file, line, _ := d.pcln.PCToLine(pc)
-		text += "\t"
-		first := true
+		sep := "\t"
 		for len(relocs) > 0 && relocs[0].Addr < i+uint64(size) {
-			if first {
-				first = false
-			} else {
-				text += " "
-			}
-			text += relocs[0].Stringer.String(pc - start)
+			text += sep + relocs[0].Stringer.String(pc-start)
+			sep = " "
 			relocs = relocs[1:]
 		}
 		f(pc, uint64(size), file, line, text)
@@ -292,7 +285,7 @@ func (d *Disasm) Decode(start, end uint64, relocs []Reloc, f func(pc, size uint6
 	}
 }
 
-type lookupFunc func(addr uint64) (sym string, base uint64)
+type lookupFunc = func(addr uint64) (sym string, base uint64)
 type disasmFunc func(code []byte, pc uint64, lookup lookupFunc, ord binary.ByteOrder) (text string, size int)
 
 func disasm_386(code []byte, pc uint64, lookup lookupFunc, _ binary.ByteOrder) (string, int) {
@@ -304,7 +297,7 @@ func disasm_amd64(code []byte, pc uint64, lookup lookupFunc, _ binary.ByteOrder)
 }
 
 func disasm_x86(code []byte, pc uint64, lookup lookupFunc, arch int) (string, int) {
-	inst, err := x86asm.Decode(code, 64)
+	inst, err := x86asm.Decode(code, arch)
 	var text string
 	size := inst.Len
 	if err != nil || size == 0 || inst.Op == 0 {
@@ -364,7 +357,7 @@ func disasm_ppc64(code []byte, pc uint64, lookup lookupFunc, byteOrder binary.By
 	inst, err := ppc64asm.Decode(code, byteOrder)
 	var text string
 	size := inst.Len
-	if err != nil || size == 0 || inst.Op == 0 {
+	if err != nil || size == 0 {
 		size = 4
 		text = "?"
 	} else {

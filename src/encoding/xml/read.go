@@ -92,6 +92,11 @@ import (
 //
 //   * A struct field with tag "-" is never unmarshaled into.
 //
+// If Unmarshal encounters a field type that implements the Unmarshaler
+// interface, Unmarshal calls its UnmarshalXML method to produce the value from
+// the XML element.  Otherwise, if the value implements
+// encoding.TextUnmarshaler, Unmarshal calls that value's UnmarshalText method.
+//
 // Unmarshal maps an XML element to a string or []byte by saving the
 // concatenation of that element's character data in the string or
 // []byte. The saved []byte is never nil.
@@ -107,12 +112,13 @@ import (
 // to the newly created value.
 //
 // Unmarshal maps an XML element or attribute value to a bool by
-// setting it to the boolean value represented by the string.
+// setting it to the boolean value represented by the string. Whitespace
+// is trimmed and ignored.
 //
 // Unmarshal maps an XML element or attribute value to an integer or
 // floating-point field by setting the field to the result of
 // interpreting the string value in decimal. There is no check for
-// overflow.
+// overflow. Whitespace is trimmed and ignored.
 //
 // Unmarshal maps an XML element to a Name by recording the element
 // name.
@@ -485,7 +491,7 @@ func (d *Decoder) unmarshal(val reflect.Value, start *StartElement) error {
 					saveAny = finfo.value(sv)
 				}
 
-			case fInnerXml:
+			case fInnerXML:
 				if !saveXML.IsValid() {
 					saveXML = finfo.value(sv)
 					if d.saved == nil {
@@ -614,7 +620,7 @@ func copyValue(dst reflect.Value, src []byte) (err error) {
 			dst.SetInt(0)
 			return nil
 		}
-		itmp, err := strconv.ParseInt(string(src), 10, dst.Type().Bits())
+		itmp, err := strconv.ParseInt(strings.TrimSpace(string(src)), 10, dst.Type().Bits())
 		if err != nil {
 			return err
 		}
@@ -624,7 +630,7 @@ func copyValue(dst reflect.Value, src []byte) (err error) {
 			dst.SetUint(0)
 			return nil
 		}
-		utmp, err := strconv.ParseUint(string(src), 10, dst.Type().Bits())
+		utmp, err := strconv.ParseUint(strings.TrimSpace(string(src)), 10, dst.Type().Bits())
 		if err != nil {
 			return err
 		}
@@ -634,7 +640,7 @@ func copyValue(dst reflect.Value, src []byte) (err error) {
 			dst.SetFloat(0)
 			return nil
 		}
-		ftmp, err := strconv.ParseFloat(string(src), dst.Type().Bits())
+		ftmp, err := strconv.ParseFloat(strings.TrimSpace(string(src)), dst.Type().Bits())
 		if err != nil {
 			return err
 		}

@@ -255,6 +255,29 @@ const (
 	FREGEXT = REG_F26 /* first external register */
 )
 
+// OpenPOWER ABI for Linux Supplement Power Architecture 64-Bit ELF V2 ABI
+// https://openpowerfoundation.org/?resource_lib=64-bit-elf-v2-abi-specification-power-architecture
+var PPC64DWARFRegisters = map[int16]int16{}
+
+func init() {
+	// f assigns dwarfregister[from:to] = (base):(to-from+base)
+	f := func(from, to, base int16) {
+		for r := int16(from); r <= to; r++ {
+			PPC64DWARFRegisters[r] = r - from + base
+		}
+	}
+	f(REG_R0, REG_R31, 0)
+	f(REG_F0, REG_F31, 32)
+	f(REG_V0, REG_V31, 77)
+	f(REG_CR0, REG_CR7, 68)
+
+	f(REG_VS0, REG_VS31, 32)  // overlaps F0-F31
+	f(REG_VS32, REG_VS63, 77) // overlaps V0-V31
+	PPC64DWARFRegisters[REG_LR] = 65
+	PPC64DWARFRegisters[REG_CTR] = 66
+	PPC64DWARFRegisters[REG_XER] = 76
+}
+
 /*
  * GENERAL:
  *
@@ -368,6 +391,7 @@ const (
 	C_GOK
 	C_ADDR
 	C_GOTADDR
+	C_TOCADDR
 	C_TLS_LE
 	C_TLS_IE
 	C_TEXTSIZE
@@ -378,6 +402,7 @@ const (
 const (
 	AADD = obj.ABasePPC64 + obj.A_ARCHSPECIFIC + iota
 	AADDCC
+	AADDIS
 	AADDV
 	AADDVCC
 	AADDC
@@ -401,6 +426,7 @@ const (
 	AANDCC
 	AANDN
 	AANDNCC
+	AANDISCC
 	ABC
 	ABCL
 	ABEQ
@@ -494,6 +520,7 @@ const (
 	AISEL
 	AMOVMW
 	ALBAR
+	ALHAR
 	ALSW
 	ALWAR
 	ALWSYNC
@@ -536,6 +563,7 @@ const (
 	AORCC
 	AORN
 	AORNCC
+	AORIS
 	AREM
 	AREMCC
 	AREMV
@@ -581,6 +609,7 @@ const (
 	ASYNC
 	AXOR
 	AXORCC
+	AXORIS
 
 	ADCBF
 	ADCBI
@@ -604,6 +633,8 @@ const (
 
 	ARFCI
 
+	AFCPSGN
+	AFCPSGNCC
 	/* optional on 32-bit */
 	AFRES
 	AFRESCC
@@ -613,6 +644,8 @@ const (
 	AFRIPCC
 	AFRIZ
 	AFRIZCC
+	AFRIN
+	AFRINCC
 	AFRSQRTE
 	AFRSQRTECC
 	AFSEL
@@ -650,6 +683,8 @@ const (
 	AFCFIDCC
 	AFCFIDU
 	AFCFIDUCC
+	AFCFIDS
+	AFCFIDSCC
 	AFCTID
 	AFCTIDCC
 	AFCTIDZ
@@ -714,6 +749,10 @@ const (
 	APOPCNTD
 	APOPCNTW
 	APOPCNTB
+	ACNTTZW
+	ACNTTZWCC
+	ACNTTZD
+	ACNTTZDCC
 	ACOPY
 	APASTECC
 	ADARN
@@ -785,6 +824,19 @@ const (
 	AVSUBE
 	AVSUBEUQM
 	AVSUBECUQ
+	AVMULESB
+	AVMULOSB
+	AVMULEUB
+	AVMULOUB
+	AVMULESH
+	AVMULOSH
+	AVMULEUH
+	AVMULOUH
+	AVMULESW
+	AVMULOSW
+	AVMULEUW
+	AVMULOUW
+	AVMULUWM
 	AVPMSUM
 	AVPMSUMB
 	AVPMSUMH
@@ -855,6 +907,9 @@ const (
 	AVCMPNEZB
 	AVCMPNEZBCC
 	AVPERM
+	AVPERMXOR
+	AVBPERMQ
+	AVBPERMD
 	AVSEL
 	AVSPLT
 	AVSPLTB
@@ -874,15 +929,21 @@ const (
 	AVSHASIGMA
 	AVSHASIGMAW
 	AVSHASIGMAD
+	AVMRGEW
+	AVMRGOW
 
 	/* VSX */
 	ALXV
 	ALXVD2X
-	ALXVDSX
 	ALXVW4X
+	ALXVH8X
+	ALXVB16X
+	ALXVDSX
 	ASTXV
 	ASTXVD2X
 	ASTXVW4X
+	ASTXVH8X
+	ASTXVB16X
 	ALXS
 	ALXSDX
 	ASTXS
