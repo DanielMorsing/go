@@ -23,6 +23,12 @@ type SparseTreeNode struct {
 	// This simplifies life if we wish to query information about x
 	// when x is both an input to and output of a block.
 	entry, exit int32
+
+	// Every block has a level in the tree corresponding to the number of ancestors
+	// it has. This is used to quickly calculate the iterated dominance frontier
+	// of a set of blocks, using the dominator tree and block structure to form
+	// an ad-hoc DJ-graph.
+	level int32
 }
 
 func (s *SparseTreeNode) String() string {
@@ -70,7 +76,7 @@ func newSparseTree(f *Func, parentOf []*Block) SparseTree {
 			t[p.ID].child = b
 		}
 	}
-	t.numberBlock(f.Entry, 1)
+	t.numberBlock(f.Entry, 1, 1)
 	return t
 }
 
@@ -81,7 +87,7 @@ func (t SparseTree) treestructure(b *Block) string {
 	return t.treestructure1(b, 0)
 }
 func (t SparseTree) treestructure1(b *Block, i int) string {
-	s := "\n" + strings.Repeat("\t", i) + b.String() + "->["
+	s := "\n" + strings.Repeat("\t", i) + b.String() + fmt.Sprintf("(l:%v)", t[b.ID].level) + "->["
 	for i, e := range b.Succs {
 		if i > 0 {
 			s += ","
@@ -130,14 +136,15 @@ func (t SparseTree) treestructure1(b *Block, i int) string {
 //   root     left     left      right       right       root
 //  1 2e 3 | 4 5e 6 | 7 8x 9 | 10 11e 12 | 13 14x 15 | 16 17x 18
 
-func (t SparseTree) numberBlock(b *Block, n int32) int32 {
+func (t SparseTree) numberBlock(b *Block, n int32, level int32) int32 {
 	// reserve n for entry-1, assign n+1 to entry
 	n++
+	t[b.ID].level = level
 	t[b.ID].entry = n
 	// reserve n+1 for entry+1, n+2 is next free number
 	n += 2
 	for c := t[b.ID].child; c != nil; c = t[c.ID].sibling {
-		n = t.numberBlock(c, n) // preserves n = next free number
+		n = t.numberBlock(c, n, level+1) // preserves n = next free number
 	}
 	// reserve n for exit-1, assign n+1 to exit
 	n++
@@ -178,6 +185,12 @@ func (t SparseTree) IsAncestorEq(x, y *Block) bool {
 	xx := &t[x.ID]
 	yy := &t[y.ID]
 	return xx.entry <= yy.entry && yy.exit <= xx.exit
+}
+
+// NumAncestors return which level a given block is in
+// the sparse tree.
+func (t SparseTree) NumAncestors(x *Block) int32 {
+	return t[x.ID].level
 }
 
 // isAncestor reports whether x is a strict ancestor of y.
