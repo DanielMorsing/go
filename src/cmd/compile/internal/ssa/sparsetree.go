@@ -6,6 +6,7 @@ package ssa
 
 import (
 	"fmt"
+	"iter"
 	"strings"
 )
 
@@ -201,6 +202,23 @@ func (t SparseTree) isAncestor(x, y *Block) bool {
 	xx := &t[x.ID]
 	yy := &t[y.ID]
 	return xx.entry < yy.entry && yy.exit < xx.exit
+}
+
+func (t SparseTree) preorder(root *Block) iter.Seq[*Block] {
+	return func(yield func(*Block) bool) {
+		work := make([]*Block, 0, 16)
+		work = append(work, root)
+		for len(work) > 0 {
+			b := work[len(work)-1]
+			work = work[:len(work)-1]
+			if !yield(b) {
+				return
+			}
+			for s := t.Child(b); s != nil; s = t.Sibling(s) {
+				work = append(work, s)
+			}
+		}
+	}
 }
 
 // domorder returns a value for dominator-oriented sorting.

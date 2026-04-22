@@ -1571,6 +1571,11 @@ func getSliceInfo(vp *Value) (inf sliceInfo) {
 // its negation. If either leads to a contradiction, it can trim that
 // successor.
 func prove(f *Func) {
+	if f.pass.test == 1 {
+		ssiify(f)
+		return
+	}
+
 	// Find induction variables.
 	var indVars map[*Block][]indVar
 	for _, v := range findIndVar(f) {
@@ -1725,6 +1730,150 @@ func prove(f *Func) {
 	ft.restore()
 
 	ft.cleanup(f)
+}
+
+func ssiify(f *Func) {
+	vals := make(map[*Value]*struct {
+		v []*Value
+	})
+	set := f.newSparseSet(f.NumValues())
+	defer f.retSparseSet(set)
+	for _, b := range f.Blocks {
+		if b.Kind != BlockIf {
+			continue
+		}
+		for _, e := range b.Succs {
+			s := e.b
+			set.clear()
+			phiArgs(s, set)
+			for _, c := range b.ControlValues() {
+				for _, a := range c.Args {
+					if !a.Type.IsInteger() || a.isGenericIntConst() {
+						continue
+					}
+					if !set.contains(a.ID) {
+						set.add(a.ID)
+						phi := s.NewValue0(a.Pos, OpPhi, a.Type)
+						args := make([]*Value, len(s.Preds))
+						for i := 0; i < len(s.Preds); i++ {
+							args[i] = a
+						}
+						phi.AddArgs(args...)
+						_var := vals[a]
+						if _var == nil {
+							_var = new(struct{ v []*Value })
+							vals[a] = _var
+						}
+						_var.v = append(_var.v, phi)
+					}
+				}
+			}
+		}
+	}
+	df := dfPlus(f)
+	for v, phis := range vals {
+		for _, p := range phis.v {
+			for _, d := range df[p.Block.ID] {
+				set.clear()
+				phiArgs(d, set)
+				if !set.contains(v.ID) {
+					dfphi := d.NewValue0(v.Pos, OpPhi, v.Type)
+					args := make([]*Value, len(d.Preds))
+					for i := 0; i < len(d.Preds); i++ {
+						args[i] = v
+					}
+					dfphi.AddArgs(args...)
+				}
+			}
+		}
+	}
+	for _, p := range vals {
+		p.v = p.v[:0]
+	}
+	sdom := f.Sdom()
+	setUse := func(b *Block, v *Value) *Value {
+		_var := vals[v]
+		if _var == nil {
+			return nil
+		}
+		stack := _var.v
+		for len(stack) > 0 && !sdom.IsAncestorEq(stack[len(stack)-1].Block, b) {
+			stack = stack[:len(stack)-1]
+		}
+		_var.v = stack
+		if len(stack) == 0 {
+			return nil
+		}
+		fmt.Printf("replacing %v with %v in b%d\n", v, stack[len(stack)-1], b.ID)
+		return stack[len(stack)-1]
+	}
+
+	for b := range sdom.preorder(f.Entry) {
+		fmt.Println(b)
+		for _, v := range b.Values {
+			if v.Op != OpPhi {
+				continue
+			}
+			for _, a := range v.Args {
+				_var := vals[a]
+				if _var != nil {
+					_var.v = append(_var.v, v)
+					vals[v] = _var
+					break
+				}
+			}
+		}
+		for _, v := range b.Values {
+			if v.Op == OpPhi {
+				continue
+			}
+			for i, a := range v.Args {
+				n := setUse(b, a)
+				if n != nil {
+					v.SetArg(i, n)
+				}
+
+			}
+		}
+
+		for _, e := range b.Succs {
+			i := e.i
+			s := e.b
+			for _, v := range s.Values {
+				if v.Op != OpPhi {
+					continue
+				}
+				n := setUse(b, v.Args[i])
+				if n != nil {
+					v.SetArg(i, n)
+				}
+			}
+		}
+	}
+	// TODO: Clean, then do dataflow
+
+	// TODO: make into copies
+	/*
+		for _, b := range f.Blocks {
+			for _, v := range b.Values {
+				if v.Op == OpPhi && len(v.Args) == 1 {
+					v.Op = OpCopy
+				}
+			}
+		}
+	*/
+}
+
+func phiArgs(b *Block, set *sparseSet) {
+	for _, v := range b.Values {
+		if v.Op != OpPhi {
+			continue
+		}
+		set.add(v.ID)
+		for _, a := range v.Args {
+			set.add(a.ID)
+		}
+	}
 }
 
 // initLimit sets initial constant limit for v.  This limit is based
