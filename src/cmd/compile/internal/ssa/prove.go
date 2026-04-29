@@ -1738,6 +1738,9 @@ func ssiify(f *Func) {
 	})
 	set := f.newSparseSet(f.NumValues())
 	defer f.retSparseSet(set)
+	// find all conditions that are branched on and add a single arity phi node
+	// on each successor for each value is an input for the condition. This gives
+	// the coming dataflow algorithm a value that represents a point in execution.
 	for _, b := range f.Blocks {
 		if b.Kind != BlockIf {
 			continue
@@ -1765,28 +1768,38 @@ func ssiify(f *Func) {
 							vals[a] = _var
 						}
 						_var.v = append(_var.v, phi)
+						vals[phi] = _var
 					}
 				}
 			}
 		}
 	}
+	// insert phis at the dominance frontier of our newly inserted
+	// phis. These will act as value joins for our dataflow analysis
 	df := dfPlus(f)
 	for v, phis := range vals {
+		if v.Op == OpPhi {
+			continue
+		}
 		for _, p := range phis.v {
 			for _, d := range df[p.Block.ID] {
 				set.clear()
 				phiArgs(d, set)
+				// if a phi already exists for our variable, don't put a
+				// new one there
 				if !set.contains(v.ID) {
 					dfphi := d.NewValue0(v.Pos, OpPhi, v.Type)
 					args := make([]*Value, len(d.Preds))
 					for i := 0; i < len(d.Preds); i++ {
-						args[i] = v
+						args[i] = p
 					}
 					dfphi.AddArgs(args...)
+					vals[dfphi] = vals[p]
 				}
 			}
 		}
 	}
+
 	for _, p := range vals {
 		p.v = p.v[:0]
 	}
@@ -1804,23 +1817,17 @@ func ssiify(f *Func) {
 		if len(stack) == 0 {
 			return nil
 		}
-		fmt.Printf("replacing %v with %v in b%d\n", v, stack[len(stack)-1], b.ID)
 		return stack[len(stack)-1]
 	}
 
 	for b := range sdom.preorder(f.Entry) {
-		fmt.Println(b)
 		for _, v := range b.Values {
 			if v.Op != OpPhi {
 				continue
 			}
-			for _, a := range v.Args {
-				_var := vals[a]
-				if _var != nil {
-					_var.v = append(_var.v, v)
-					vals[v] = _var
-					break
-				}
+			_var := vals[v]
+			if _var != nil {
+				_var.v = append(_var.v, v)
 			}
 		}
 		for _, v := range b.Values {
@@ -1832,7 +1839,10 @@ func ssiify(f *Func) {
 				if n != nil {
 					v.SetArg(i, n)
 				}
-
+			}
+			_var := vals[v]
+			if _var != nil {
+				_var.v = append(_var.v, v)
 			}
 		}
 
@@ -1850,7 +1860,27 @@ func ssiify(f *Func) {
 			}
 		}
 	}
-	// TODO: Clean, then do dataflow
+	// TODO: is this clean sufficient?
+	for _, b := range f.postorder() {
+		for _, p := range b.Values {
+			if p.Op != OpPhi {
+				continue
+			}
+			if p.Uses == 0 {
+				p.resetArgs()
+				f.freeValue(p)
+			}
+		}
+		i := 0
+		for _, v := range b.Values {
+			if v.Op == OpInvalid {
+				continue
+			}
+			b.Values[i] = v
+			i++
+		}
+		b.Values = b.Values[:i]
+	}
 
 	// TODO: make into copies
 	/*
