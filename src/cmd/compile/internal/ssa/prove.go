@@ -1571,7 +1571,7 @@ func getSliceInfo(vp *Value) (inf sliceInfo) {
 // its negation. If either leads to a contradiction, it can trim that
 // successor.
 func prove(f *Func) {
-	if f.pass.test == 1 {
+	if f.pass.test > 0 {
 		ssiify(f)
 		return
 	}
@@ -1733,13 +1733,16 @@ func prove(f *Func) {
 }
 
 func ssiify(f *Func) {
-	vals := make(map[*Value]*struct {
-		v []*Value
-	})
+	const (
+		ValueActual = iota
+		ValuePhi
+		ValueDfPhi
+	)
+	needsRename := make(map[*Value]int)
 	set := f.newSparseSet(f.NumValues())
 	defer f.retSparseSet(set)
-	// find all conditions that are branched on and add a single arity phi node
-	// on each successor for each value is an input for the condition. This gives
+	// find all conditions that are branched on and add a phi node
+	// on each successor for each value that is an input for the condition. This gives
 	// the coming dataflow algorithm a value that represents a point in execution.
 	for _, b := range f.Blocks {
 		if b.Kind != BlockIf {
@@ -1751,9 +1754,17 @@ func ssiify(f *Func) {
 			phiArgs(s, set)
 			for _, c := range b.ControlValues() {
 				for _, a := range c.Args {
+					// TODO: pointers and booleans
 					if !a.Type.IsInteger() || a.isGenericIntConst() {
 						continue
 					}
+					// there's no point in creating phi nodes for values
+					// that only have one use, they cannot propagate any
+					// information
+					if a.Uses == 1 {
+						continue
+					}
+					needsRename[a] = ValueActual
 					if !set.contains(a.ID) {
 						set.add(a.ID)
 						phi := s.NewValue0(a.Pos, OpPhi, a.Type)
@@ -1762,13 +1773,7 @@ func ssiify(f *Func) {
 							args[i] = a
 						}
 						phi.AddArgs(args...)
-						_var := vals[a]
-						if _var == nil {
-							_var = new(struct{ v []*Value })
-							vals[a] = _var
-						}
-						_var.v = append(_var.v, phi)
-						vals[phi] = _var
+						needsRename[phi] = ValuePhi
 					}
 				}
 			}
@@ -1777,57 +1782,65 @@ func ssiify(f *Func) {
 	// insert phis at the dominance frontier of our newly inserted
 	// phis. These will act as value joins for our dataflow analysis
 	df := dfPlus(f)
-	for v, phis := range vals {
-		if v.Op == OpPhi {
+	if f.pass.test < 2 {
+		return
+	}
+	for v, t := range needsRename {
+		if t == ValueActual || t == ValueDfPhi {
 			continue
 		}
-		for _, p := range phis.v {
-			for _, d := range df[p.Block.ID] {
-				set.clear()
-				phiArgs(d, set)
-				// if a phi already exists for our variable, don't put a
-				// new one there
-				if !set.contains(v.ID) {
-					dfphi := d.NewValue0(v.Pos, OpPhi, v.Type)
-					args := make([]*Value, len(d.Preds))
-					for i := 0; i < len(d.Preds); i++ {
-						args[i] = p
-					}
-					dfphi.AddArgs(args...)
-					vals[dfphi] = vals[p]
+		v = v.Args[0]
+		for _, d := range df[v.Block.ID] {
+			set.clear()
+			phiArgs(d, set)
+			// if a phi already exists for our variable, don't put a
+			// new one there
+			if !set.contains(v.ID) {
+				dfphi := d.NewValue0(v.Pos, OpPhi, v.Type)
+				args := make([]*Value, len(d.Preds))
+				for i := 0; i < len(d.Preds); i++ {
+					args[i] = v
 				}
+				dfphi.AddArgs(args...)
+				needsRename[dfphi] = ValueDfPhi
 			}
 		}
 	}
-
-	for _, p := range vals {
-		p.v = p.v[:0]
+	if f.pass.test < 3 {
+		return
 	}
+
 	sdom := f.Sdom()
-	setUse := func(b *Block, v *Value) *Value {
-		_var := vals[v]
-		if _var == nil {
-			return nil
+	reachDef := f.Cache.allocValueSlice(f.NumValues())
+	defer f.Cache.freeValueSlice(reachDef)
+	for v, t := range needsRename {
+		reachDef[v.ID] = v
+		if t == ValueDfPhi || t == ValuePhi {
+			reachDef[v.ID] = v.Args[0]
 		}
-		stack := _var.v
-		for len(stack) > 0 && !sdom.IsAncestorEq(stack[len(stack)-1].Block, b) {
-			stack = stack[:len(stack)-1]
-		}
-		_var.v = stack
-		if len(stack) == 0 {
-			return nil
-		}
-		return stack[len(stack)-1]
 	}
-
 	for b := range sdom.preorder(f.Entry) {
+		if f.pass.debug > 2 {
+			fmt.Println("visiting block", b)
+		}
+		// first, run through the values of this block, updating our reaching
+		// definition. Since we're only inserting phis and we never insert a phi
+		// in the same block as a values definition, we can ignore scheduling.
 		for _, v := range b.Values {
-			if v.Op != OpPhi {
+			// not a value that needs renaming
+			if reachDef[v.ID] == nil {
 				continue
 			}
-			_var := vals[v]
-			if _var != nil {
-				_var.v = append(_var.v, v)
+			// bottom of stack is represented with
+			// self-reference
+			r := reachDef[v.ID]
+			if r == v {
+				continue
+			}
+			reachDef[v.ID] = reachDef[r.ID]
+			reachDef[r.ID] = v
+			if f.pass.debug > 2 {
+				printDefChain("after push", b, v, reachDef)
 			}
 		}
 		for _, v := range b.Values {
@@ -1835,53 +1848,41 @@ func ssiify(f *Func) {
 				continue
 			}
 			for i, a := range v.Args {
-				n := setUse(b, a)
-				if n != nil {
-					v.SetArg(i, n)
+				r := reachDef[a.ID]
+				if r == nil {
+					continue
+				}
+				if f.pass.debug > 2 {
+					printDefChain("before pop", b, a, reachDef)
+				}
+				for r != a && !sdom.IsAncestorEq(r.Block, b) {
+					r = reachDef[r.ID]
+				}
+				if f.pass.debug > 2 {
+					fmt.Println("replacing", a, "with", r)
+				}
+				v.SetArg(i, r)
+				reachDef[a.ID] = r
+				if f.pass.debug > 2 {
+					printDefChain("after pop", b, a, reachDef)
 				}
 			}
-			_var := vals[v]
-			if _var != nil {
-				_var.v = append(_var.v, v)
-			}
 		}
-
 		for _, e := range b.Succs {
-			i := e.i
 			s := e.b
+			i := e.i
 			for _, v := range s.Values {
 				if v.Op != OpPhi {
 					continue
 				}
-				n := setUse(b, v.Args[i])
-				if n != nil {
-					v.SetArg(i, n)
+				a := v.Args[i]
+				r := reachDef[a.ID]
+				if r != nil {
+					v.SetArg(i, r)
 				}
 			}
 		}
 	}
-	// TODO: is this clean sufficient?
-	for _, b := range f.postorder() {
-		for _, p := range b.Values {
-			if p.Op != OpPhi {
-				continue
-			}
-			if p.Uses == 0 {
-				p.resetArgs()
-				f.freeValue(p)
-			}
-		}
-		i := 0
-		for _, v := range b.Values {
-			if v.Op == OpInvalid {
-				continue
-			}
-			b.Values[i] = v
-			i++
-		}
-		b.Values = b.Values[:i]
-	}
-
 	// TODO: make into copies
 	/*
 		for _, b := range f.Blocks {
@@ -1892,6 +1893,15 @@ func ssiify(f *Func) {
 			}
 		}
 	*/
+}
+
+func printDefChain(tag string, b *Block, v *Value, reachDef []*Value) {
+	fmt.Printf("def chain %s: %s in block %v\n", tag, v, b)
+	x := reachDef[v.ID]
+	for x != v {
+		x = reachDef[x.ID]
+		fmt.Printf("\t[%v] %s\n", x.Block, x.LongString())
+	}
 }
 
 func phiArgs(b *Block, set *sparseSet) {
