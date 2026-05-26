@@ -1732,13 +1732,13 @@ func prove(f *Func) {
 	ft.cleanup(f)
 }
 
+type defStack struct {
+	orig *Value
+	head *Value
+}
+
 func ssiify(f *Func) {
-	const (
-		ValueActual = iota
-		ValuePhi
-		ValueDfPhi
-	)
-	needsRename := make(map[*Value]int)
+	valToVars := make(map[*Value]*defStack)
 	set := f.newSparseSet(f.NumValues())
 	defer f.retSparseSet(set)
 	// find all conditions that are branched on and add a phi node
@@ -1764,7 +1764,13 @@ func ssiify(f *Func) {
 					if a.Uses == 1 {
 						continue
 					}
-					needsRename[a] = ValueActual
+					_var, ok := valToVars[a]
+					if !ok {
+						_var = &defStack{
+							orig: a,
+						}
+						valToVars[a] = _var
+					}
 					if !set.contains(a.ID) {
 						set.add(a.ID)
 						phi := s.NewValue0(a.Pos, OpPhi, a.Type)
@@ -1773,7 +1779,7 @@ func ssiify(f *Func) {
 							args[i] = a
 						}
 						phi.AddArgs(args...)
-						needsRename[phi] = ValuePhi
+						valToVars[phi] = _var
 					}
 				}
 			}
@@ -1785,24 +1791,23 @@ func ssiify(f *Func) {
 	if f.pass.test < 2 {
 		return
 	}
-	for v, t := range needsRename {
-		if t == ValueActual || t == ValueDfPhi {
+	for val, _var := range valToVars {
+		if val != _var.orig {
 			continue
 		}
-		v = v.Args[0]
-		for _, d := range df[v.Block.ID] {
+		for _, d := range df[val.Block.ID] {
 			set.clear()
 			phiArgs(d, set)
 			// if a phi already exists for our variable, don't put a
 			// new one there
-			if !set.contains(v.ID) {
-				dfphi := d.NewValue0(v.Pos, OpPhi, v.Type)
+			if !set.contains(val.ID) {
+				dfphi := d.NewValue0(val.Pos, OpPhi, val.Type)
 				args := make([]*Value, len(d.Preds))
 				for i := 0; i < len(d.Preds); i++ {
-					args[i] = v
+					args[i] = _var.orig
 				}
 				dfphi.AddArgs(args...)
-				needsRename[dfphi] = ValueDfPhi
+				valToVars[dfphi] = _var
 			}
 		}
 	}
@@ -1810,15 +1815,14 @@ func ssiify(f *Func) {
 		return
 	}
 
+	// Phis are inserted, now rename all the uses
 	sdom := f.Sdom()
+	// instead of keeping a separate stack for each variable, have each
+	// value exist as a node in a linked list. Because values can
+	// only belong to one variable at a time, this lets us avoid any
+	// allocations when we push values onto the stacks.
 	reachDef := f.Cache.allocValueSlice(f.NumValues())
 	defer f.Cache.freeValueSlice(reachDef)
-	for v, t := range needsRename {
-		reachDef[v.ID] = v
-		if t == ValueDfPhi || t == ValuePhi {
-			reachDef[v.ID] = v.Args[0]
-		}
-	}
 	for b := range sdom.preorder(f.Entry) {
 		if f.pass.debug > 2 {
 			fmt.Println("visiting block", b)
@@ -1827,80 +1831,153 @@ func ssiify(f *Func) {
 		// definition. Since we're only inserting phis and we never insert a phi
 		// in the same block as a values definition, we can ignore scheduling.
 		for _, v := range b.Values {
-			// not a value that needs renaming
-			if reachDef[v.ID] == nil {
+			_var, ok := valToVars[v]
+			if !ok {
 				continue
 			}
-			// bottom of stack is represented with
-			// self-reference
-			r := reachDef[v.ID]
-			if r == v {
-				continue
-			}
-			reachDef[v.ID] = reachDef[r.ID]
-			reachDef[r.ID] = v
 			if f.pass.debug > 2 {
-				printDefChain("after push", b, v, reachDef)
+				fmt.Println("new definition", v, "for", _var.orig)
 			}
+			pushDefStack(_var, reachDef, v)
 		}
 		for _, v := range b.Values {
 			if v.Op == OpPhi {
 				continue
 			}
 			for i, a := range v.Args {
-				r := reachDef[a.ID]
-				if r == nil {
+				_var, ok := valToVars[a]
+				if !ok {
 					continue
 				}
-				if f.pass.debug > 2 {
-					printDefChain("before pop", b, a, reachDef)
-				}
-				for r != a && !sdom.IsAncestorEq(r.Block, b) {
-					r = reachDef[r.ID]
-				}
-				if f.pass.debug > 2 {
-					fmt.Println("replacing", a, "with", r)
-				}
-				v.SetArg(i, r)
-				reachDef[a.ID] = r
-				if f.pass.debug > 2 {
-					printDefChain("after pop", b, a, reachDef)
+				x := popDefStack(sdom, _var, reachDef, b)
+				v.SetArg(i, x)
+				if f.pass.debug > 2 && x != a {
+					fmt.Println("replacing", a, "with", x)
 				}
 			}
 		}
 		for _, e := range b.Succs {
-			s := e.b
-			i := e.i
-			for _, v := range s.Values {
+			succ := e.b
+			idx := e.i
+			for _, v := range succ.Values {
 				if v.Op != OpPhi {
 					continue
 				}
-				a := v.Args[i]
-				r := reachDef[a.ID]
-				if r != nil {
-					v.SetArg(i, r)
+				_var, ok := valToVars[v.Args[idx]]
+				if !ok {
+					continue
 				}
+				x := popDefStack(sdom, _var, reachDef, b)
+				v.SetArg(idx, x)
 			}
 		}
 	}
-	// TODO: make into copies
-	/*
-		for _, b := range f.Blocks {
-			for _, v := range b.Values {
-				if v.Op == OpPhi && len(v.Args) == 1 {
-					v.Op = OpCopy
+	if f.pass.test < 4 {
+		return
+	}
+
+	// Done renaming, now prune all the phis that were found useless.
+
+	// we're done with the reaching definitions array. Repurpose it as an
+	// easy lookup from ID to value.
+	vals := reachDef
+	stack := f.newSparseSet(f.NumValues())
+	defer f.retSparseSet(stack)
+	useful := f.newSparseSet(f.NumValues())
+	defer f.retSparseSet(useful)
+	for b := range sdom.preorder(f.Entry) {
+		for _, v := range b.Values {
+			vals[v.ID] = v
+			if v.Op == OpPhi {
+				continue
+			}
+			for _, a := range v.Args {
+				if a.Op != OpPhi {
+					continue
 				}
+				stack.add(a.ID)
+				useful.add(a.ID)
 			}
 		}
-	*/
+	}
+	for stack.size() > 0 {
+		id := stack.pop()
+		p := vals[id]
+		for _, a := range p.Args {
+			if a.Op != OpPhi {
+				continue
+			}
+			if !useful.contains(a.ID) {
+				useful.add(a.ID)
+				stack.add(a.ID)
+			}
+		}
+	}
+	// actually remove the values from the blocks.
+	// Do it in 2 stages (reset args, then remove from blocks),
+	// because phis might refer to each other and we need the uses
+	// field to be zero before we can free the value
+	hasRemoved := f.newSparseSet(f.NumBlocks())
+	defer f.retSparseSet(hasRemoved)
+	for v, _var := range valToVars {
+		if v == _var.orig {
+			continue
+		}
+		if !useful.contains(v.ID) {
+			hasRemoved.add(v.Block.ID)
+			v.resetArgs()
+		}
+	}
+	for _, b := range f.Blocks {
+		if !hasRemoved.contains(b.ID) {
+			continue
+		}
+		i := 0
+		for _, v := range b.Values {
+			if v.Op == OpPhi && !useful.contains(v.ID) {
+				f.freeValue(v)
+			} else {
+				b.Values[i] = v
+				i++
+			}
+		}
+		b.truncateValues(i)
+	}
 }
 
-func printDefChain(tag string, b *Block, v *Value, reachDef []*Value) {
+func pushDefStack(_var *defStack, reachDef []*Value, v *Value) {
+	oldhead := _var.head
+	_var.head = v
+	if oldhead != nil {
+		reachDef[v.ID] = oldhead
+	}
+}
+
+func popDefStack(sdom SparseTree, _var *defStack, reachDef []*Value, b *Block) *Value {
+	r := _var.head
+	for {
+		if r == nil {
+			_var.head = r
+			return _var.orig
+		}
+		if sdom.IsAncestorEq(r.Block, b) {
+			_var.head = r
+			return r
+		}
+		r = reachDef[r.ID]
+	}
+}
+
+func printDefStack(tag string, b *Block, v *Value, head *Value, reachDef []*Value) {
 	fmt.Printf("def chain %s: %s in block %v\n", tag, v, b)
-	x := reachDef[v.ID]
-	for x != v {
-		x = reachDef[x.ID]
+	if head == nil {
+		return
+	}
+	fmt.Printf("\t[%v] %s\n", head.Block, head.LongString())
+	x := reachDef[head.ID]
+	for x != nil {
 		fmt.Printf("\t[%v] %s\n", x.Block, x.LongString())
+		x = reachDef[x.ID]
 	}
 }
 
