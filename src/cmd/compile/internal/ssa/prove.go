@@ -1771,7 +1771,7 @@ func ssiify(f *Func) {
 						}
 						valToVars[a] = _var
 					}
-					if !set.contains(a.ID) {
+					if !set.contains(a.ID) && a.Block != s {
 						set.add(a.ID)
 						phi := s.NewValue0(a.Pos, OpPhi, a.Type)
 						args := make([]*Value, len(s.Preds))
@@ -1800,7 +1800,7 @@ func ssiify(f *Func) {
 			phiArgs(d, set)
 			// if a phi already exists for our variable, don't put a
 			// new one there
-			if !set.contains(val.ID) {
+			if !set.contains(val.ID) && _var.orig.Block != d {
 				dfphi := d.NewValue0(val.Pos, OpPhi, val.Type)
 				args := make([]*Value, len(d.Preds))
 				for i := 0; i < len(d.Preds); i++ {
